@@ -6,11 +6,15 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from nonebot_plugin_alconna import Target
+
 from plugin_chatbot.bridge.service import (
     BridgeConfig,
     BridgeService,
+    IncomingMessage,
     audit_reply,
     conversation_key,
+    sender_context,
     split_message,
 )
 
@@ -44,6 +48,30 @@ class BridgeServiceTests(unittest.TestCase):
         self.assertTrue(self.service.is_allowed("group", "room-1", "member"))
         self.assertFalse(self.service.is_allowed("group", "room-2", "member"))
         self.assertTrue(self.service.is_allowed("group", "room-2", "owner"))
+
+    def test_private_target_id_can_identify_owner(self) -> None:
+        self.service.config.owner_ids = {"qq-private-openid"}
+        self.assertTrue(
+            self.service.is_admin("different-event-openid", "qq-private-openid")
+        )
+        self.assertTrue(
+            self.service.is_allowed(
+                "private", "qq-private-openid", "different-event-openid"
+            )
+        )
+        key, chat_id = self.service.resolve_chat(
+            "qq", "bot", "private", "qq-private-openid"
+        )
+        self.assertEqual(
+            "已进入静默模式。",
+            self.service.command(
+                "different-event-openid",
+                "/silent",
+                key,
+                chat_id,
+                peer_id="qq-private-openid",
+            ),
+        )
 
     def test_mapping_survives_restart(self) -> None:
         first, chat_id = self.service.resolve_chat("satori", "bot", "group", "room")
@@ -86,6 +114,35 @@ class BridgeServiceTests(unittest.TestCase):
         parts = split_message(text, 9)
         self.assertTrue(all(len(part) <= 9 for part in parts))
         self.assertEqual(" ".join(parts), text)
+
+    def test_outbound_rate_limit_is_per_conversation_and_persists(self) -> None:
+        self.service.config.max_messages_per_minute = 2
+        self.assertTrue(self.service.reserve_outbound("group-a", now=100))
+        self.assertTrue(self.service.reserve_outbound("group-a", now=100))
+        self.assertFalse(self.service.reserve_outbound("group-a", now=100))
+        self.assertTrue(self.service.reserve_outbound("group-b", now=100))
+
+        restored = BridgeService(self.service.config)
+        self.assertFalse(restored.reserve_outbound("group-a", now=100))
+        self.assertTrue(restored.reserve_outbound("group-a", now=160.01))
+
+    def test_sender_context_includes_group_and_speaker_ids(self) -> None:
+        incoming = IncomingMessage(
+            bot=None,
+            platform="QQ",
+            bot_id="bot",
+            kind="group",
+            peer_id="group-openid",
+            user_id="member-openid",
+            user_name="member",
+            text="hello",
+            target=Target("group-openid"),
+            reply_to="message-1",
+        )
+        context = sender_context(incoming)
+        self.assertIn("group_openid=group-openid", context)
+        self.assertIn("user_id=member-openid", context)
+        self.assertIn("引用: message-1", context)
 
     def test_sensitive_output_is_blocked(self) -> None:
         self.assertIsNotNone(audit_reply("api_key=topsecret"))

@@ -30,6 +30,11 @@ nonebot-plugin-alconna = ["nonebot_plugin_alconna"]
 
 [tool.setuptools.package-data]
 plugin_chatbot = ["plugins/*.html"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["agent", "agent.*", "plugin_chatbot", "plugin_chatbot.*"]
+
 [tool.ruff]
 line-length = 88
 target-version = "py39"

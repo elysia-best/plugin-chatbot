@@ -6,13 +6,14 @@ import asyncio
 import base64
 import binascii
 import contextlib
+import json
 import secrets
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.responses import FileResponse
-from nonebot import get_driver, get_plugin_config, on_message
+from nonebot import get_driver, get_plugin_config, logger, on_message
 from nonebot.adapters import Bot, Event  # noqa: TC002
 from nonebot_plugin_alconna import Image, Target, UniMessage, get_target, image_fetch
 from pydantic import BaseModel
@@ -28,6 +29,7 @@ MAX_INITIAL_PROMPT_CHARS = 4000
 MAX_SLANG_TERM_CHARS = 100
 MAX_IMAGES_PER_MESSAGE = 8
 MAX_SIMULATION_PROMPT_CHARS = 20_000
+MESSAGE_LOG_PREVIEW_CHARS = 120
 
 
 class Settings(BaseModel):
@@ -38,11 +40,12 @@ class Settings(BaseModel):
     agent_api_key: str = ""
     agent_workspace: str = ""
     bridge_state_dir: str = ""
-    bridge_owner_ids: str = ""
-    bridge_allowed_groups: str = ""
-    bridge_allowed_private: str = ""
+    bridge_owner_ids: str | int | list[str | int] = ""
+    bridge_allowed_groups: str | int | list[str | int] = ""
+    bridge_allowed_private: str | int | list[str | int] = ""
     bridge_mode: str = "chat"
     bridge_max_message_chars: int = 500
+    bridge_max_messages_per_minute: int = 6
     bridge_max_media_bytes: int = 8 * 1024 * 1024
     bridge_console_token: str = ""
     bridge_voice_dir: str = ""
@@ -61,9 +64,24 @@ class Settings(BaseModel):
 
 def _as_ids(value: Any) -> set[str]:
     if isinstance(value, str):
-        return {part.strip() for part in value.split(",") if part.strip()}
+        text = value.strip()
+        if text.startswith("["):
+            try:
+                value = json.loads(text)
+            except json.JSONDecodeError:
+                pass
+        if isinstance(value, str):
+            return {part.strip() for part in value.split(",") if part.strip()}
+    if isinstance(value, int) and not isinstance(value, bool):
+        return {str(value)}
     if isinstance(value, (list, tuple, set)):
-        return {str(part) for part in value}
+        return {
+            str(part).strip()
+            for part in value
+            if isinstance(part, (str, int))
+            and not isinstance(part, bool)
+            and str(part).strip()
+        }
     return set()
 
 
@@ -89,6 +107,9 @@ _service = BridgeService(
             else "chat",
         ),
         max_message_chars=max(100, min(_settings.bridge_max_message_chars, 4000)),
+        max_messages_per_minute=max(
+            1, min(_settings.bridge_max_messages_per_minute, 60)
+        ),
         max_media_bytes=max(
             1024, min(_settings.bridge_max_media_bytes, 32 * 1024 * 1024)
         ),
@@ -119,10 +140,12 @@ async def _message_content(
     message: Any, event: Event, bot: Bot
 ) -> tuple[str, list[dict[str, Any]]]:
     try:
-        plain = UniMessage.of(message).extract_plain_text().strip()
+        unified = UniMessage.of(message, bot=bot)
+        plain = unified.extract_plain_text().strip()
     except (AttributeError, TypeError):
+        unified = UniMessage()
         plain = str(message).strip()
-    media_types = {str(getattr(segment, "type", "")) for segment in message}
+    media_types = {str(getattr(segment, "type", "")) for segment in unified}
     placeholders = [
         label
         for kind, label in (
@@ -135,7 +158,7 @@ async def _message_content(
     ]
     content: list[dict[str, Any]] = []
     media_bytes = 0
-    for segment in message:
+    for segment in unified:
         if not isinstance(segment, Image) and getattr(segment, "type", "") != "image":
             continue
         if len(content) >= MAX_IMAGES_PER_MESSAGE:
@@ -143,14 +166,17 @@ async def _message_content(
             continue
         try:
             raw_bytes = await image_fetch(event, bot, {}, segment)
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Chat bridge image fetch failed: {}", type(exc).__name__)
             raw_bytes = None
+        if not raw_bytes:
+            placeholders.append("[图片不可读取]")
+            continue
         if (
-            not raw_bytes
-            or len(raw_bytes) > _service.config.max_media_bytes
+            len(raw_bytes) > _service.config.max_media_bytes
             or media_bytes + len(raw_bytes) > _service.config.max_media_bytes
         ):
-            placeholders.append("[图片不可读取或超过媒体大小限制]")
+            placeholders.append("[图片超过媒体大小限制]")
             continue
         media_bytes += len(raw_bytes)
         mimetype = getattr(segment, "mimetype", None) or "image/png"
@@ -179,6 +205,21 @@ async def _handle_message(bot: Bot, event: Event) -> None:
     event_id = str(event_id_method() if callable(event_id_method) else "")
     message = event.get_message()
     text, content = await _message_content(message, event, bot)
+    normalized_text = " ".join(text.split())
+    preview = normalized_text[:MESSAGE_LOG_PREVIEW_CHARS]
+    event_type = getattr(getattr(event, "__type__", None), "value", None)
+    logger.info(
+        "Chat bridge inbound: platform={} event_type={} bot_id={} kind={} "
+        "user_id={} target_id={} message={!r}{}",
+        bot.adapter.get_name(),
+        event_type or event.get_type(),
+        bot.self_id,
+        kind,
+        user_id,
+        peer_id,
+        preview,
+        "..." if len(normalized_text) > MESSAGE_LOG_PREVIEW_CHARS else "",
+    )
     if not text and not content:
         return
     reply_to = ""
@@ -186,26 +227,23 @@ async def _handle_message(bot: Bot, event: Event) -> None:
         if getattr(segment, "type", "") == "reply":
             reply_to = str(getattr(segment, "data", {}).get("id", ""))
             break
-    response = await _service.handle_message(
-        IncomingMessage(
-            bot=bot,
-            platform=bot.adapter.get_name(),
-            bot_id=str(bot.self_id),
-            kind=kind,
-            peer_id=peer_id,
-            user_id=user_id,
-            user_name=user_name,
-            text=text,
-            target=target,
-            event_id=event_id,
-            reply_to=reply_to,
-            content=content,
-        )
+    incoming = IncomingMessage(
+        bot=bot,
+        platform=bot.adapter.get_name(),
+        bot_id=str(bot.self_id),
+        kind=kind,
+        peer_id=peer_id,
+        user_id=user_id,
+        user_name=user_name,
+        text=text,
+        target=target,
+        event_id=event_id,
+        reply_to=reply_to,
+        content=content,
     )
-    if response:
-        await UniMessage(response).send(
-            target=target, bot=bot, reply_to=reply_to or False
-        )
+    response = await _service.handle_message(incoming)
+    if response and not await _service.send_reply(incoming, response):
+        logger.warning("Chat bridge suppressed reply due to outbound rate limit")
 
 
 def _console_token() -> str:

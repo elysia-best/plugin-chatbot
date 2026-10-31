@@ -26,6 +26,7 @@ if TYPE_CHECKING:
 Mode = Literal["chat", "closed-agent", "reserved", "reserved2"]
 EVENT_TTL_SECONDS = 300
 VOICE_WINDOW_SECONDS = 3600
+OUTBOUND_WINDOW_SECONDS = 60
 _SECRET_RE = re.compile(
     r"(?i)(?:api[_ -]?key|access[_ -]?token|password|passwd|secret)\s*[:=]\s*\S+"
 )
@@ -46,6 +47,7 @@ class BridgeConfig:
     allowed_private: set[str] = field(default_factory=set)
     mode: Mode = "chat"
     max_message_chars: int = 500
+    max_messages_per_minute: int = 6
     max_media_bytes: int = 8 * 1024 * 1024
     console_token: str = ""
     role_dir: Path | None = None
@@ -100,6 +102,7 @@ class BridgeState:
             "active_role": None,
             "slang_settings": {},
             "voice_sends": [],
+            "outbound_sends": {},
             "simulation_prompts": {"reserved": "", "reserved2": ""},
         }
         try:
@@ -119,6 +122,7 @@ class BridgeState:
             ("wake", {}),
             ("initial_prompts", {}),
             ("voice_sends", []),
+            ("outbound_sends", {}),
             ("simulation_prompts", {"reserved": "", "reserved2": ""}),
         ):
             if not isinstance(self.data.get(key), type(value)):
@@ -131,6 +135,11 @@ class BridgeState:
             for stamp in self.data["voice_sends"]
             if isinstance(stamp, (int, float))
         ]
+        self.data["outbound_sends"] = {
+            key: [stamp for stamp in stamps if isinstance(stamp, (int, float))]
+            for key, stamps in self.data["outbound_sends"].items()
+            if isinstance(key, str) and isinstance(stamps, list)
+        }
 
     def save(self) -> None:
         temp = self.path.with_suffix(".tmp")
@@ -150,6 +159,18 @@ def conversation_key(platform: str, bot_id: str, kind: str, peer_id: str) -> str
     """Opaque, stable key so adapter IDs cannot escape into filesystem paths."""
     raw = "\x1f".join((platform.casefold(), bot_id, kind, peer_id))
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def sender_context(incoming: IncomingMessage) -> str:
+    """Attach platform IDs to the user turn so the Agent can identify its source."""
+    metadata = (
+        f"[消息元数据 platform={incoming.platform} kind={incoming.kind} "
+        f"user_id={incoming.user_id}"
+    )
+    if incoming.kind == "group":
+        metadata += f" group_openid={incoming.peer_id}"
+    quote = f" [引用: {incoming.reply_to}]" if incoming.reply_to else ""
+    return f"{metadata}]\n[{incoming.user_name}]{quote}\n"
 
 
 def split_message(text: str, limit: int) -> list[str]:
@@ -242,11 +263,13 @@ class BridgeService:
         self.slang_tasks: set[asyncio.Task[None]] = set()
         self.slang_locks: dict[str, asyncio.Lock] = {}
 
-    def is_admin(self, user_id: str) -> bool:
-        return user_id in self.config.owner_ids
+    def is_admin(self, user_id: str, peer_id: str | None = None) -> bool:
+        return user_id in self.config.owner_ids or (
+            peer_id is not None and peer_id in self.config.owner_ids
+        )
 
     def is_allowed(self, kind: str, peer_id: str, user_id: str) -> bool:
-        if self.is_admin(user_id):
+        if self.is_admin(user_id, peer_id if kind == "private" else None):
             return True
         allowlist = (
             self.config.allowed_groups
@@ -341,6 +364,8 @@ class BridgeService:
         try:
             target = self.targets[key]
             bot = self.bots[key]
+            if not self.reserve_outbound(key):
+                return False
             await UniMessage(f"需要授权：{question}\n请回复：通过 / 拒绝").send(
                 target=target, bot=bot
             )
@@ -385,7 +410,10 @@ class BridgeService:
             bot = self.bots.get(key)
             if target is None or bot is None:
                 return "Error: conversation target is unavailable"
-            await self.send_text(key, text, reply_to=args.get("reply_to_message_id"))
+            if not await self.send_text(
+                key, text, reply_to=args.get("reply_to_message_id")
+            ):
+                return "Error: outbound message rate limit reached"
             return "Message sent"
 
         async def wait_message(args: dict[str, Any], _ctx: ToolContext) -> str:
@@ -424,7 +452,8 @@ class BridgeService:
             ]
             if len(self.state.data["voice_sends"]) >= self.config.voice_sends_per_hour:
                 return "Error: voice send hourly limit reached"
-            await self._send_voice_file(key, path)
+            if not await self._send_voice_file(key, path):
+                return "Error: outbound message rate limit reached"
             self.state.data["voice_sends"].append(now)
             self.state.save()
             return "Voice sent"
@@ -531,22 +560,57 @@ class BridgeService:
             ),
         ]
 
-    async def send_text(self, key: str, text: str, reply_to: Any = None) -> None:
+    def reserve_outbound(
+        self, key: str, count: int = 1, *, now: float | None = None
+    ) -> bool:
+        stamp = time.time() if now is None else now
+        cutoff = stamp - OUTBOUND_WINDOW_SECONDS
+        sends = self.state.data["outbound_sends"]
+        for conversation, history in list(sends.items()):
+            recent = [item for item in history if cutoff < item <= stamp]
+            if recent:
+                sends[conversation] = recent
+            else:
+                del sends[conversation]
+        recent = sends.get(key, [])
+        limit = max(1, self.config.max_messages_per_minute)
+        if count < 1 or len(recent) + count > limit:
+            return False
+        sends[key] = [*recent, *([stamp] * count)]
+        self.state.save()
+        return True
+
+    async def send_reply(self, incoming: IncomingMessage, text: str) -> bool:
+        key = conversation_key(
+            incoming.platform, incoming.bot_id, incoming.kind, incoming.peer_id
+        )
+        return await self.send_text(key, text, reply_to=incoming.reply_to or None)
+
+    async def send_text(
+        self, key: str, text: str, reply_to: Any = None
+    ) -> bool:
         target = self.targets[key]
         bot = self.bots[key]
-        for part in split_message(text, self.config.max_message_chars):
+        parts = split_message(text, self.config.max_message_chars)
+        if not self.reserve_outbound(key, len(parts)):
+            return False
+        for part in parts:
             message = UniMessage(part)
             await message.send(target=target, bot=bot, reply_to=reply_to or False)
+        return True
 
-    async def _send_voice_file(self, key: str, path: Path) -> None:
+    async def _send_voice_file(self, key: str, path: Path) -> bool:
         target, bot = self.targets.get(key), self.bots.get(key)
         if target is None or bot is None:
             raise RuntimeError("会话目标当前不可用")
+        if not self.reserve_outbound(key):
+            return False
         voice = UniMessage.voice(path=path, name=path.name, mimetype="audio/wav")
         try:
             await voice.send(target=target, bot=bot)
         except Exception as exc:
             raise RuntimeError("当前适配器无法发送语音/音频") from exc
+        return True
 
     async def _run_slang_agent(self, prompt: str, *, research: bool) -> str:
         available = {"WebSearch", "WebFetch"}
@@ -656,6 +720,8 @@ class BridgeService:
     async def handle_message(  # noqa: C901, PLR0911, PLR0912, PLR0915
         self, incoming: IncomingMessage
     ) -> str:
+        private_peer = incoming.peer_id if incoming.kind == "private" else None
+        owner = self.is_admin(incoming.user_id, private_peer)
         if not self.is_allowed(incoming.kind, incoming.peer_id, incoming.user_id):
             return ""
         now = time.time()
@@ -683,19 +749,25 @@ class BridgeService:
         for waiter in self.waiters.get(key, []):
             if not waiter.done():
                 waiter.set_result(incoming.text)
-        if self.state.data["silent"] and not self.is_admin(incoming.user_id):
+        if self.state.data["silent"] and not owner:
             self.state.log(
                 f"{incoming.platform}:{incoming.kind}:{incoming.peer_id} "
                 "静默期间收到消息"
             )
             return ""
         if incoming.text.startswith("/"):
-            command_result = self.command(incoming.user_id, incoming.text, key, chat_id)
+            command_result = self.command(
+                incoming.user_id,
+                incoming.text,
+                key,
+                chat_id,
+                peer_id=private_peer,
+            )
             if command_result is not None:
                 return command_result
         mode = self.state.data["mode"]
         if mode == "closed-agent" and not (
-            self.is_admin(incoming.user_id) and incoming.kind == "private"
+            owner and incoming.kind == "private"
         ):
             return ""
         if (
@@ -722,12 +794,8 @@ class BridgeService:
                 task.add_done_callback(self.slang_tasks.discard)
         lock = self.locks.setdefault(key, asyncio.Lock())
         async with lock:
-            agent = self._agent(key, chat_id, owner=self.is_admin(incoming.user_id))
-            quote = f" [引用: {incoming.reply_to}]" if incoming.reply_to else ""
-            prefix = (
-                f"[{incoming.user_name} / {incoming.platform} / {incoming.kind}]"
-                f"{quote}\n"
-            )
+            agent = self._agent(key, chat_id, owner=owner)
+            prefix = sender_context(incoming)
             prompt: str | list[dict[str, Any]] = incoming.text
             if incoming.content:
                 prompt = [
@@ -780,11 +848,19 @@ class BridgeService:
         del self.state.data["usage"][:-20000]
         self.state.save()
 
-    def command(self, user_id: str, text: str, key: str, chat_id: str) -> str | None:  # noqa: C901, PLR0911, PLR0912
+    def command(
+        self,
+        user_id: str,
+        text: str,
+        key: str,
+        chat_id: str,
+        *,
+        peer_id: str | None = None,
+    ) -> str | None:  # noqa: C901, PLR0911, PLR0912
         parts = text.strip().split(maxsplit=1)
         command = parts[0].casefold()
         argument = parts[1].strip() if len(parts) > 1 else ""
-        admin = self.is_admin(user_id)
+        admin = self.is_admin(user_id, peer_id)
         if command == "/status":
             silent = "是" if self.state.data["silent"] else "否"
             return f"模式：{self.state.data['mode']}；静默：{silent}；会话：{chat_id}"
