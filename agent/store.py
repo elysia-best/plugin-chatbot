@@ -212,6 +212,26 @@ class SessionStore:
             self._write_cursor[resolved] = len(messages)
         self._touch_record(resolved, len(messages))
 
+    def replace(self, chat_id: str, messages: list[Message]) -> None:
+        """Atomically replace a chat transcript, for example after compaction."""
+        resolved = self.resolve(chat_id) or chat_id
+        path = self._chat_path(resolved)
+        temp = path.with_suffix(".jsonl.tmp")
+        with temp.open("w", encoding="utf-8") as stream:
+            for message in messages:
+                stream.write(
+                    json.dumps(
+                        {"t": time.time(), "m": message.to_dict()},
+                        ensure_ascii=False,
+                    )
+                    + "\n"
+                )
+        temp.replace(path)
+        cached = self._chat_cache.setdefault(resolved, [])
+        cached[:] = messages
+        self._write_cursor[resolved] = len(messages)
+        self._touch_record(resolved, len(messages))
+
     def save_all(self) -> None:
         for chat_id in list(self._chat_cache.keys()):
             self.save(chat_id)

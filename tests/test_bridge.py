@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 from nonebot_plugin_alconna import Target
 
@@ -143,6 +145,41 @@ class BridgeServiceTests(unittest.TestCase):
         self.assertIn("group_openid=group-openid", context)
         self.assertIn("user_id=member-openid", context)
         self.assertIn("引用: message-1", context)
+
+    def test_group_messages_in_batch_share_one_agent_request(self) -> None:
+        async def run_test() -> None:
+            self.service.config.group_batch_seconds = 0.01
+            process = AsyncMock(return_value="one grouped reply")
+            self.service._process_message = process
+
+            def incoming(user_id: str, text: str) -> IncomingMessage:
+                return IncomingMessage(
+                    bot=None,
+                    platform="QQ",
+                    bot_id="bot",
+                    kind="group",
+                    peer_id="group-openid",
+                    user_id=user_id,
+                    user_name=user_id,
+                    text=text,
+                    target=Target("group-openid"),
+                    event_id=f"event-{user_id}",
+                )
+
+            first, second = await asyncio.gather(
+                self.service.handle_message(incoming("member-1", "hello")),
+                self.service.handle_message(incoming("member-2", "world")),
+            )
+
+            self.assertEqual(1, process.await_count)
+            self.assertCountEqual(["one grouped reply", ""], [first, second])
+            combined = process.await_args.args[0]
+            self.assertTrue(combined.preformatted)
+            self.assertIn("user_id=member-1", combined.text)
+            self.assertIn("user_id=member-2", combined.text)
+            self.assertIn("group_openid=group-openid", combined.text)
+
+        asyncio.run(run_test())
 
     def test_sensitive_output_is_blocked(self) -> None:
         self.assertIsNotNone(audit_reply("api_key=topsecret"))

@@ -76,8 +76,12 @@ Agent(
     store=None,  # 自定义 SessionStore（默认用 store_root 或 workspace/.agent/sessions）
     store_root=None,  # 会话存储目录（默认 <workspace>/.agent/sessions）
     autosave=True,  # run() 结束后自动落盘
+    max_context=262144,  # 上下文 token 预算
+    compact_rate=0.8,  # 达到预算比例时压缩
 )
 ```
+
+运行前会估算历史与新输入的 token 数；达到 `max_context * compact_rate` 后，Agent 用同一 LLM 总结较早历史、保留最近完整对话轮次，并原子替换该会话的 JSONL。图片按约 1024 token 估算，因此这是触发压缩的近似值。
 
 ### 核心方法
 

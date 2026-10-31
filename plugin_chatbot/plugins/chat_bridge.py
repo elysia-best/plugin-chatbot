@@ -46,6 +46,9 @@ class Settings(BaseModel):
     bridge_mode: str = "chat"
     bridge_max_message_chars: int = 500
     bridge_max_messages_per_minute: int = 6
+    bridge_group_batch_seconds: float = 1.0
+    max_context: int = 262_144
+    compact_rate: float = 0.8
     bridge_max_media_bytes: int = 8 * 1024 * 1024
     bridge_console_token: str = ""
     bridge_voice_dir: str = ""
@@ -110,6 +113,9 @@ _service = BridgeService(
         max_messages_per_minute=max(
             1, min(_settings.bridge_max_messages_per_minute, 60)
         ),
+        group_batch_seconds=max(0.0, min(_settings.bridge_group_batch_seconds, 10.0)),
+        max_context=max(4096, min(_settings.max_context, 2_000_000)),
+        compact_rate=max(0.1, min(_settings.compact_rate, 0.99)),
         max_media_bytes=max(
             1024, min(_settings.bridge_max_media_bytes, 32 * 1024 * 1024)
         ),

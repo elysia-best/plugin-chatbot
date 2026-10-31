@@ -48,6 +48,9 @@ class BridgeConfig:
     mode: Mode = "chat"
     max_message_chars: int = 500
     max_messages_per_minute: int = 6
+    group_batch_seconds: float = 1.0
+    max_context: int = 262_144
+    compact_rate: float = 0.8
     max_media_bytes: int = 8 * 1024 * 1024
     console_token: str = ""
     role_dir: Path | None = None
@@ -79,6 +82,7 @@ class IncomingMessage:
     event_id: str = ""
     reply_to: str = ""
     content: list[dict[str, Any]] | None = None
+    preformatted: bool = False
 
 
 class BridgeState:
@@ -262,6 +266,10 @@ class BridgeService:
         self.slang_windows: dict[str, list[dict[str, str]]] = {}
         self.slang_tasks: set[asyncio.Task[None]] = set()
         self.slang_locks: dict[str, asyncio.Lock] = {}
+        self.group_batches: dict[
+            str, list[tuple[IncomingMessage, asyncio.Future[str]]]
+        ] = {}
+        self.group_batch_tasks: dict[str, asyncio.Task[None]] = {}
 
     def is_admin(self, user_id: str, peer_id: str | None = None) -> bool:
         return user_id in self.config.owner_ids or (
@@ -350,6 +358,8 @@ class BridgeService:
             permissions=permissions,
             ask_callback=ask_callback,
             store=self.store,
+            max_context=self.config.max_context,
+            compact_rate=self.config.compact_rate,
         )
         agent.load_chat(chat_id)
         self.agents[key] = agent
@@ -630,6 +640,8 @@ class BridgeService:
             permissions=permissions,
             store_root=self.config.state_dir / "slang-sessions",
             autosave=False,
+            max_context=self.config.max_context,
+            compact_rate=self.config.compact_rate,
         )
         try:
             result = await agent.run(prompt)
@@ -717,7 +729,80 @@ class BridgeService:
             except Exception as exc:  # noqa: BLE001
                 self.state.log(f"黑话提取失败：{type(exc).__name__}")
 
-    async def handle_message(  # noqa: C901, PLR0911, PLR0912, PLR0915
+    async def handle_message(self, incoming: IncomingMessage) -> str:
+        if (
+            incoming.kind != "group"
+            or incoming.text.startswith("/")
+            or self.config.group_batch_seconds <= 0
+        ):
+            return await self._process_message(incoming)
+        key = conversation_key(
+            incoming.platform, incoming.bot_id, incoming.kind, incoming.peer_id
+        )
+        future: asyncio.Future[str] = asyncio.get_running_loop().create_future()
+        self.group_batches.setdefault(key, []).append((incoming, future))
+        task = self.group_batch_tasks.get(key)
+        if task is None or task.done():
+            self.group_batch_tasks[key] = asyncio.create_task(
+                self._flush_group_batch(key)
+            )
+        return await future
+
+    async def _flush_group_batch(self, key: str) -> None:
+        await asyncio.sleep(max(0.0, min(self.config.group_batch_seconds, 10.0)))
+        queued = self.group_batches.pop(key, [])
+        if not queued:
+            return
+        if self.group_batch_tasks.get(key) is asyncio.current_task():
+            self.group_batch_tasks.pop(key, None)
+        messages = [incoming for incoming, _future in queued]
+        first = messages[0]
+        now = time.time()
+        self.seen_events = {
+            event_id: stamp
+            for event_id, stamp in self.seen_events.items()
+            if now - stamp < EVENT_TTL_SECONDS
+        }
+        for item in messages[1:]:
+            if item.event_id:
+                self.seen_events[item.event_id] = now
+        chunks: list[dict[str, Any]] = []
+        for item in messages:
+            chunks.append(
+                {
+                    "type": "text",
+                    "text": f"{sender_context(item)}{item.text}",
+                }
+            )
+            chunks.extend(item.content or [])
+        combined = IncomingMessage(
+            bot=first.bot,
+            platform=first.platform,
+            bot_id=first.bot_id,
+            kind=first.kind,
+            peer_id=first.peer_id,
+            user_id=first.user_id,
+            user_name=f"{len(messages)} 位群成员",
+            text="\n".join(
+                f"{sender_context(item)}{item.text}" for item in messages
+            ),
+            target=messages[-1].target,
+            event_id=first.event_id,
+            content=chunks,
+            preformatted=True,
+        )
+        try:
+            response = await self._process_message(combined)
+        except Exception as exc:  # noqa: BLE001
+            for _incoming, future in queued:
+                if not future.done():
+                    future.set_exception(exc)
+            raise
+        for index, (_incoming, future) in enumerate(queued):
+            if not future.done():
+                future.set_result(response if index == 0 else "")
+
+    async def _process_message(  # noqa: C901, PLR0911, PLR0912, PLR0915
         self, incoming: IncomingMessage
     ) -> str:
         private_peer = incoming.peer_id if incoming.kind == "private" else None
@@ -795,13 +880,17 @@ class BridgeService:
         lock = self.locks.setdefault(key, asyncio.Lock())
         async with lock:
             agent = self._agent(key, chat_id, owner=owner)
-            prefix = sender_context(incoming)
+            prefix = "" if incoming.preformatted else sender_context(incoming)
             prompt: str | list[dict[str, Any]] = incoming.text
             if incoming.content:
-                prompt = [
-                    {"type": "text", "text": prefix + incoming.text},
-                    *incoming.content,
-                ]
+                prompt = (
+                    list(incoming.content)
+                    if incoming.preformatted
+                    else [
+                        {"type": "text", "text": prefix + incoming.text},
+                        *incoming.content,
+                    ]
+                )
             else:
                 prompt = prefix + incoming.text
             initial = self.state.data["initial_prompts"].pop(key, None)
