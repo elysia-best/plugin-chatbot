@@ -50,6 +50,7 @@ Without configured owner IDs or allowlists, only configured owners can use the b
 
 Bridge persistence is separate from the Agent's normal coding sessions. Message transport always goes through Alconna abstractions; features such as native reply references depend on the adapter's exported segment support.
 
+Default web admin panel is on http://127.0.0.1:8080/chat-agent/
 ## Development checks
 
 ```powershell
