@@ -8,6 +8,7 @@ dependencies = [
     "nonebot-plugin-alconna>=0.62.1",
     "nonebot2[fastapi]>=2.5.0",
     "openai>=3.42.0",
+    "pyttsx3>=2.90",
 ]
 
 [project.optional-dependencies]
@@ -26,6 +27,9 @@ builtin_plugins = []
 [tool.nonebot.plugins]
 "@local" = []
 nonebot-plugin-alconna = ["nonebot_plugin_alconna"]
+
+[tool.setuptools.package-data]
+plugin_chatbot = ["plugins/*.html"]
 [tool.ruff]
 line-length = 88
 target-version = "py39"

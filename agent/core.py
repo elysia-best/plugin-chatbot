@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any, Callable, Literal
 
 from .llm import LLMBackend, LLMClient, Usage
-from .messages import Message
+from .messages import Message, MessageContent
 from .permissions import (
     PermissionBehavior,
     PermissionContext,
@@ -259,7 +259,7 @@ class Agent:
     # --- 主循环 ---
 
     async def run(  # noqa: C901, PLR0912, PLR0915
-        self, prompt: str, chat_id: str | None = None
+        self, prompt: str | MessageContent, chat_id: str | None = None
     ) -> AgentResult:
         """运行一轮对话。
 

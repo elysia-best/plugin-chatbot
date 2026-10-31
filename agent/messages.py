@@ -8,9 +8,10 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any, Literal, TypeAlias
 
 Role = Literal["system", "user", "assistant", "tool"]
+MessageContent: TypeAlias = str | list[dict[str, Any]] | None
 
 
 @dataclass
@@ -65,7 +66,7 @@ class Message:
     """一条对话消息（OpenAI 格式）。"""
 
     role: Role
-    content: str | None = None
+    content: MessageContent = None
     tool_calls: list[ToolCall] | None = None
     tool_call_id: str | None = None
     name: str | None = None
@@ -91,13 +92,7 @@ class Message:
         role = raw.get("role", "user")
         content = raw.get("content")
         if isinstance(content, list):
-            parts: list[str] = []
-            for item in content:
-                if isinstance(item, dict) and item.get("type") == "text":
-                    parts.append(item.get("text", ""))
-                elif isinstance(item, str):
-                    parts.append(item)
-            content = "\n".join(parts) or None
+            content = [item for item in content if isinstance(item, dict)]
         tool_calls = None
         if raw.get("tool_calls"):
             tool_calls = [
