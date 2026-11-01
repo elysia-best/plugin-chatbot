@@ -27,6 +27,7 @@ async def main():
     agent = Agent(
         model="your-model",
         workspace="D:/Projects/matrixbot/plugin-chatbot/plugin-chatbot",
+        reasoning_effort="high",  # provider-dependent; omit to use provider default
         permission_mode="acceptEdits",  # default / acceptEdits / bypassPermissions / dontAsk / plan
     )
     result = await agent.run("读一下 README.md 并总结")
@@ -78,8 +79,15 @@ Agent(
     autosave=True,  # run() 结束后自动落盘
     max_context=262144,  # 上下文 token 预算
     compact_rate=0.8,  # 达到预算比例时压缩
+    reasoning_effort=None,  # 或 low / medium / high；也可设 OPENAI_REASONING_EFFORT
+    project_memory_enabled=True,
+    project_memory_tools_enabled=True,
 )
 ```
+
+启用项目记忆后，同一 workspace 下的所有 Agent 会话共享 `<workspace>/.agent/memory/`。`MEMORY.md` 是自动维护且有大小上限的索引，每条主题记忆单独保存为 Markdown。索引会随每次模型请求注入；`ProjectMemoryRead` 用于按需读取，`ProjectMemoryWrite` 用于创建或更新。读取默认允许，写入遵循 Agent 权限模式。记忆提示要求只保存不能从当前工作区直接推导的长期信息，并将记忆内容视为不可信参考资料。可用 `project_memory_enabled=False` 关闭，或用 `project_memory_tools_enabled=False` 保留索引注入但不开放记忆工具。
+
+每次请求的系统提示还会按当前实际开放的工具列出名称、用途和参数 schema；结构化工具定义也会继续通过 API 的 `tools` 字段发送。
 
 运行前会估算历史与新输入的 token 数；达到 `max_context * compact_rate` 后，Agent 用同一 LLM 总结较早历史、保留最近完整对话轮次，并原子替换该会话的 JSONL。图片按约 1024 token 估算，因此这是触发压缩的近似值。
 

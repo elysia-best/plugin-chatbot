@@ -72,7 +72,12 @@ class LLMClient:
         key = api_key or os.getenv("OPENAI_API_KEY") or "EMPTY"
         self.temperature = temperature
         self.max_tokens = max_tokens
-        self.reasoning_effort = reasoning_effort
+        effort = (
+            reasoning_effort
+            if reasoning_effort is not None
+            else os.getenv("OPENAI_REASONING_EFFORT", "")
+        )
+        self.reasoning_effort = effort.strip() or None
         # client 参数便于测试注入 mock
         self._client = client or AsyncOpenAI(
             base_url=base, api_key=key, timeout=timeout

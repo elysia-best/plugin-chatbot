@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock
 
 from nonebot_plugin_alconna import Target
 
+from agent.llm import LLMClient
 from plugin_chatbot.bridge.service import (
     BridgeConfig,
     BridgeService,
@@ -136,15 +137,27 @@ class BridgeServiceTests(unittest.TestCase):
             kind="group",
             peer_id="group-openid",
             user_id="member-openid",
-            user_name="member",
+            user_name="Alice Example",
             text="hello",
             target=Target("group-openid"),
             reply_to="message-1",
+            group_name="Research Group",
         )
         context = sender_context(incoming)
         self.assertIn("group_openid=group-openid", context)
         self.assertIn("user_id=member-openid", context)
+        self.assertIn('group_name="Research Group"', context)
+        self.assertIn('user_nickname="Alice Example"', context)
+        self.assertIn("\n[member-openid]", context)
         self.assertIn("引用: message-1", context)
+
+    def test_bridge_agent_system_prompt_explains_group_and_sender_metadata(self) -> None:
+        key, chat_id = self.service.resolve_chat("test", "bot", "group", "room-1")
+        agent = self.service._agent(key, chat_id, owner=False)
+        prompt = agent._build_system_prompt()
+        self.assertIn("`user_id` 始终是当前发言用户", prompt)
+        self.assertIn("`group_openid` 是群标识，不是发言用户标识", prompt)
+        self.assertIn("逐条区分用户", prompt)
 
     def test_group_messages_in_batch_share_one_agent_request(self) -> None:
         async def run_test() -> None:
@@ -173,7 +186,10 @@ class BridgeServiceTests(unittest.TestCase):
 
             self.assertEqual(1, process.await_count)
             self.assertCountEqual(["one grouped reply", ""], [first, second])
-            combined = process.await_args.args[0]
+            call = process.await_args
+            if call is None:
+                self.fail("Agent processing was not called")
+            combined = call.args[0]
             self.assertTrue(combined.preformatted)
             self.assertIn("user_id=member-1", combined.text)
             self.assertIn("user_id=member-2", combined.text)
@@ -188,10 +204,28 @@ class BridgeServiceTests(unittest.TestCase):
         self.assertIsNone(audit_reply("普通聊天内容"))
 
     def test_chat_tools_are_allowlisted_by_agent_permissions(self) -> None:
+        self.service.config.reasoning_effort = "high"
         key, chat_id = self.service.resolve_chat("test", "bot", "private", "friend-1")
         agent = self.service._agent(key, chat_id, owner=False)
         send_tool = next(tool for tool in agent._tools if tool.name == "chat_send")
+        memory_read = next(
+            tool for tool in agent._tools if tool.name == "ProjectMemoryRead"
+        )
+        memory_write = next(
+            tool for tool in agent._tools if tool.name == "ProjectMemoryWrite"
+        )
         self.assertEqual("allow", agent._check_permission(send_tool, {"text": "hi"}))
+        self.assertEqual("allow", agent._check_permission(memory_read, {}))
+        self.assertEqual("deny", agent._check_permission(memory_write, {}))
+
+        same_agent = self.service._agent(key, chat_id, owner=True)
+
+        self.assertIs(agent, same_agent)
+        self.assertEqual("allow", agent._check_permission(memory_write, {}))
+        llm = agent._llm
+        if not isinstance(llm, LLMClient):
+            self.fail("Bridge did not create an LLMClient")
+        self.assertEqual("high", llm.reasoning_effort)
 
     def test_command_permissions_and_modes(self) -> None:
         key, chat_id = self.service.resolve_chat("test", "bot", "private", "owner")

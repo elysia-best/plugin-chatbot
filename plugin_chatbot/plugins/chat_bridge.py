@@ -38,6 +38,7 @@ class Settings(BaseModel):
     agent_model: str = ""
     agent_base_url: str = ""
     agent_api_key: str = ""
+    agent_reasoning_effort: str = ""
     agent_workspace: str = ""
     bridge_state_dir: str = ""
     bridge_owner_ids: str | int | list[str | int] = ""
@@ -99,6 +100,7 @@ _service = BridgeService(
         model=_settings.agent_model,
         base_url=_settings.agent_base_url,
         api_key=_settings.agent_api_key,
+        reasoning_effort=_settings.agent_reasoning_effort.strip(),
         owner_ids=_as_ids(_settings.bridge_owner_ids),
         allowed_groups=_as_ids(_settings.bridge_allowed_groups),
         allowed_private=_as_ids(_settings.bridge_allowed_private),
@@ -194,6 +196,45 @@ async def _message_content(
     return " ".join(part for part in [plain, *placeholders] if part), content
 
 
+def _name_value(value: Any) -> str:
+    if isinstance(value, str):
+        return value.strip()
+    keys = ("name", "title", "group_name", "guild_name", "channel_name")
+    if isinstance(value, dict):
+        for key in keys:
+            nested = value.get(key)
+            if isinstance(nested, str) and nested.strip():
+                return nested.strip()
+    for key in keys:
+        nested = getattr(value, key, None)
+        if isinstance(nested, str) and nested.strip():
+            return nested.strip()
+    return ""
+
+
+def _group_name(event: Event, target: Target) -> str:
+    getter = getattr(event, "get_group_name", None)
+    if callable(getter):
+        try:
+            name = _name_value(getter())
+        except (AttributeError, NotImplementedError, TypeError, ValueError):
+            name = ""
+        if name:
+            return name
+    keys = ("group_name", "guild_name", "channel_name", "group", "guild", "channel")
+    for source in (event, target.extra):
+        for key in keys:
+            value = (
+                source.get(key)
+                if isinstance(source, dict)
+                else getattr(source, key, None)
+            )
+            name = _name_value(value)
+            if name:
+                return name
+    return ""
+
+
 @_message.handle()
 async def _handle_message(bot: Bot, event: Event) -> None:
     user_id = str(event.get_user_id())
@@ -206,7 +247,7 @@ async def _handle_message(bot: Bot, event: Event) -> None:
     kind = "private" if target.private else "group"
     peer_id = target.id if kind == "private" else (target.parent_id or target.id)
     name_method = getattr(event, "get_user_name", None)
-    user_name = str(name_method() if callable(name_method) else user_id)
+    user_name = _name_value(name_method() if callable(name_method) else "") or user_id
     event_id_method = getattr(event, "get_message_id", None)
     event_id = str(event_id_method() if callable(event_id_method) else "")
     message = event.get_message()
@@ -246,6 +287,7 @@ async def _handle_message(bot: Bot, event: Event) -> None:
         event_id=event_id,
         reply_to=reply_to,
         content=content,
+        group_name=_group_name(event, target) if kind == "group" else "",
     )
     response = await _service.handle_message(incoming)
     if response and not await _service.send_reply(incoming, response):
@@ -317,6 +359,14 @@ async def _resolve_approval(
 
 class UpdateRequest(BaseModel):
     value: str
+
+
+class ProjectMemoryRequest(BaseModel):
+    name: str
+    title: str
+    description: str
+    type: str
+    content: str
 
 
 class VoiceUploadRequest(BaseModel):
@@ -533,6 +583,72 @@ async def _delete_role(name: str) -> dict[str, bool]:
         _service.state.data["active_role"] = None
         _service.state.save()
     _clear_role_agents()
+    return {"deleted": True}
+
+
+@_api.get("/api/memories", dependencies=[Depends(_authorize)])
+async def _memories() -> list[dict[str, Any]]:
+    return _service.memories.list()
+
+
+@_api.get("/api/memories/index", dependencies=[Depends(_authorize)])
+async def _memory_index() -> dict[str, str]:
+    return {"content": _service.memories.index()}
+
+
+@_api.get("/api/memories/{name}", dependencies=[Depends(_authorize)])
+async def _get_memory(name: str) -> dict[str, Any]:
+    try:
+        return _service.memories.get(name)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Memory not found") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@_api.post("/api/memories", dependencies=[Depends(_authorize)])
+async def _create_memory(body: ProjectMemoryRequest) -> dict[str, str]:
+    try:
+        _service.memories.get(body.name)
+    except FileNotFoundError:
+        pass
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    else:
+        raise HTTPException(status_code=409, detail="Memory already exists")
+    try:
+        _service.memories.save(
+            body.name, body.title, body.description, body.type, body.content
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return {"name": body.name}
+
+
+@_api.put("/api/memories/{name}", dependencies=[Depends(_authorize)])
+async def _update_memory(name: str, body: ProjectMemoryRequest) -> dict[str, str]:
+    if name != body.name:
+        raise HTTPException(status_code=422, detail="Memory name cannot be changed")
+    try:
+        _service.memories.get(name)
+        _service.memories.save(
+            body.name, body.title, body.description, body.type, body.content
+        )
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Memory not found") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return {"name": name}
+
+
+@_api.delete("/api/memories/{name}", dependencies=[Depends(_authorize)])
+async def _delete_memory(name: str) -> dict[str, bool]:
+    try:
+        _service.memories.delete(name)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Memory not found") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     return {"deleted": True}
 
 

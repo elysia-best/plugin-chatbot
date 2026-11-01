@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any, Literal
 from nonebot_plugin_alconna import Target, UniMessage
 
 from agent import Agent, PermissionRule, SessionStore, Tool, ToolContext
+from agent.memory import ProjectMemoryStore
 from agent.messages import Message
 from agent.tools import builtin_tools
 
@@ -44,6 +45,7 @@ class BridgeConfig:
     model: str = ""
     base_url: str = ""
     api_key: str = ""
+    reasoning_effort: str = ""
     owner_ids: set[str] = field(default_factory=set)
     allowed_groups: set[str] = field(default_factory=set)
     allowed_private: set[str] = field(default_factory=set)
@@ -85,6 +87,7 @@ class IncomingMessage:
     reply_to: str = ""
     content: list[dict[str, Any]] | None = None
     preformatted: bool = False
+    group_name: str = ""
 
 
 class BridgeState:
@@ -175,8 +178,16 @@ def sender_context(incoming: IncomingMessage) -> str:
     )
     if incoming.kind == "group":
         metadata += f" group_openid={incoming.peer_id}"
+        if incoming.group_name:
+            metadata += (
+                f" group_name={json.dumps(incoming.group_name, ensure_ascii=False)}"
+            )
+    if incoming.user_name and incoming.user_name != incoming.user_id:
+        metadata += (
+            f" user_nickname={json.dumps(incoming.user_name, ensure_ascii=False)}"
+        )
     quote = f" [引用: {incoming.reply_to}]" if incoming.reply_to else ""
-    return f"{metadata}]\n[{incoming.user_name}]{quote}\n"
+    return f"{metadata}]\n[{incoming.user_id}]{quote}\n"
 
 
 def split_message(text: str, limit: int) -> list[str]:
@@ -251,6 +262,7 @@ class BridgeService:
         }:
             self.state.data["mode"] = config.mode
         self.store = SessionStore(config.state_dir / "sessions")
+        self.memories = ProjectMemoryStore(config.workspace)
         self.agents: dict[str, Agent] = {}
         self.targets: dict[str, Target] = {}
         self.bots: dict[str, Any] = {}
@@ -315,9 +327,22 @@ class BridgeService:
 
     def _agent(self, key: str, chat_id: str, *, owner: bool) -> Agent:
         agent = self.agents.get(key)
-        if agent is not None:
-            return agent
         chat_tools = self.chat_tools(key)
+        permissions = [
+            PermissionRule(tool=tool.name, behavior="allow") for tool in chat_tools
+        ]
+        permissions.extend(
+            (
+                PermissionRule(tool="ProjectMemoryRead", behavior="allow"),
+                PermissionRule(
+                    tool="ProjectMemoryWrite",
+                    behavior="allow" if owner else "deny",
+                ),
+            )
+        )
+        if agent is not None:
+            agent.update_permissions(permissions)
+            return agent
         tools = list(chat_tools)
         if owner and self.state.data["mode"] == "closed-agent":
             tools.extend(builtin_tools())
@@ -325,7 +350,20 @@ class BridgeService:
         async def ask_callback(question: str) -> bool:
             return await self._request_approval(key, question)
 
-        system = "你是跨平台聊天助手。遵守用户安全边界，不泄漏凭据或本机路径。"
+        system = (
+            "你是跨平台聊天助手。遵守用户安全边界，不泄漏凭据或本机路径。\n\n"
+            "【消息格式与来源】\n"
+            "每条输入可能以 `[消息元数据 ...]` 开始，下一行 `[user_id]` 标记当前"
+            "发言用户，再后面才是该用户的消息正文。`platform` 表示消息平台，"
+            "`kind=group` 表示"
+            "群聊、`kind=private` 表示私聊；`user_id` 始终是当前发言用户的标识。"
+            "群聊中的 `group_openid` 是群标识，不是发言用户标识；"
+            "`group_name` 是群名称，"
+            "`user_nickname` 是发言用户昵称，二者仅用于识别上下文和称呼。私聊通常没有"
+            "群标识。群聊合并消息会重复附带每位发言者各自的元数据和 `[user_id]` 标记，"
+            "必须逐条"
+            "区分用户，不要把群名或群标识当作发送者。"
+        )
         simulation_prompt = self.state.data["simulation_prompts"].get(
             self.state.data["mode"], ""
         )
@@ -349,9 +387,6 @@ class BridgeService:
         ]
         if slang:
             system += "\n\n【已确认的群聊用语】\n" + "\n".join(slang[:50])
-        permissions = [
-            PermissionRule(tool=tool.name, behavior="allow") for tool in chat_tools
-        ]
         agent = Agent(
             model=self.config.model or None,
             base_url=self.config.base_url or None,
@@ -364,6 +399,7 @@ class BridgeService:
             store=self.store,
             max_context=self.config.max_context,
             compact_rate=self.config.compact_rate,
+            reasoning_effort=self.config.reasoning_effort or None,
         )
         agent.load_chat(chat_id)
         self.agents[key] = agent
@@ -741,6 +777,8 @@ class BridgeService:
             autosave=False,
             max_context=self.config.max_context,
             compact_rate=self.config.compact_rate,
+            reasoning_effort=self.config.reasoning_effort or None,
+            project_memory_enabled=False,
         )
         try:
             result = await agent.run(prompt)

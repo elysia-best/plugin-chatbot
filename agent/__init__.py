@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from .core import Agent, AgentResult, Status, ToolExecution
 from .llm import LLMClient, LLMResponse, Usage
+from .memory import ProjectMemoryStore
 from .messages import Message, ToolCall
 from .permissions import (
     PermissionBehavior,
@@ -31,6 +32,7 @@ __all__ = [
     "PermissionContext",
     "PermissionMode",
     "PermissionRule",
+    "ProjectMemoryStore",
     "SessionRecord",
     "SessionStore",
     "Status",

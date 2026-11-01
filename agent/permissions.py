@@ -211,4 +211,5 @@ def default_rules() -> list[PermissionRule]:
         PermissionRule(tool="Glob", behavior="allow"),
         PermissionRule(tool="Grep", behavior="allow"),
         PermissionRule(tool="WebFetch", behavior="allow"),
+        PermissionRule(tool="ProjectMemoryRead", behavior="allow"),
     ]
