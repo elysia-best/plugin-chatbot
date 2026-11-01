@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import json
 import uuid
 from collections.abc import Coroutine
@@ -399,6 +400,13 @@ class Agent:
                 )
                 if resp.usage:
                     total_usage.merge(resp.usage)
+                    if resp.usage.prompt_tokens > 0:
+                        self.store.set_context_usage(
+                            target,
+                            prompt_tokens=resp.usage.prompt_tokens,
+                            estimated_tokens=estimate_message_tokens(history),
+                            fingerprint=self._context_fingerprint(),
+                        )
 
                 assistant_msg = Message(
                     role="assistant",
@@ -522,7 +530,16 @@ class Agent:
     ) -> Usage:
         incoming = Message(role="user", content=prompt)
         threshold = int(self.max_context * self.compact_rate)
-        if estimate_message_tokens([*history, incoming]) < threshold:
+        estimated_tokens = estimate_message_tokens([*history, incoming])
+        usage = self.store.context_usage(chat_id, self._context_fingerprint())
+        predicted_tokens = estimated_tokens
+        if usage is not None:
+            measured_tokens, previous_estimate = usage
+            predicted_tokens = max(
+                estimated_tokens,
+                measured_tokens + max(0, estimated_tokens - previous_estimate),
+            )
+        if predicted_tokens < threshold:
             return Usage()
 
         keep_from = max(0, len(history) - 8)
@@ -556,6 +573,17 @@ class Agent:
         self._store.replace(chat_id, compacted)
         history[:] = compacted
         return response.usage
+
+    def _context_fingerprint(self) -> str:
+        payload = {
+            "model": getattr(self._llm, "model", None),
+            "system": self._build_system_prompt(),
+            "tools": [tool.schema() for tool in self._tools],
+        }
+        encoded = json.dumps(
+            payload, ensure_ascii=False, sort_keys=True
+        ).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
 
     # --- 历史（作用于当前 chat，兼容旧语义） ---
 

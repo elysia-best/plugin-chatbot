@@ -182,6 +182,7 @@ class ProjectMemoryTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual("medium", api.kwargs["reasoning_effort"])
         self.assertEqual("test", api.kwargs["model"])
+        self.assertEqual({"include_usage": True}, api.kwargs["stream_options"])
 
         no_effort_api = FakeCompletions()
         no_effort_client = LLMClient(model="test")
@@ -191,6 +192,29 @@ class ProjectMemoryTests(unittest.IsolatedAsyncioTestCase):
         with patch.dict(os.environ, {"OPENAI_REASONING_EFFORT": ""}):
             await no_effort_client.complete([Message(role="user", content="hello")])
         self.assertNotIn("reasoning_effort", no_effort_api.kwargs)
+
+    async def test_llm_client_falls_back_when_stream_usage_is_unsupported(self) -> None:
+        class UsageUnsupportedCompletions:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            async def create(self, **kwargs):
+                self.calls += 1
+                if "stream_options" in kwargs:
+                    raise ValueError("unsupported stream_options")
+
+                async def stream():
+                    yield SimpleNamespace(usage=None, choices=[])
+
+                return stream()
+
+        api = UsageUnsupportedCompletions()
+        client = LLMClient(model="test")
+        client._client = SimpleNamespace(chat=SimpleNamespace(completions=api))
+
+        await client.complete([Message(role="user", content="hello")])
+
+        self.assertEqual(2, api.calls)
 
 
 if __name__ == "__main__":

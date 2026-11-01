@@ -6,8 +6,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from agent import Agent, LLMResponse, Message, ToolCall
+from agent import Agent, LLMResponse, Message, ToolCall, Usage
 from agent.context import estimate_message_tokens
+from agent.store import SessionStore
 
 
 class CompactionLLM:
@@ -21,7 +22,86 @@ class CompactionLLM:
         return LLMResponse(content="final answer")
 
 
+class MeasuredLLM:
+    async def complete(self, messages, tools=None, system_prompt=None):
+        return LLMResponse(content="answer", usage=Usage(prompt_tokens=77))
+
+
 class ContextCompactionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_run_persists_provider_reported_prompt_usage(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            agent = Agent(model="test", workspace=temp)
+            agent._llm = MeasuredLLM()
+            chat_id = agent.new_chat()
+
+            await agent.run("hello", chat_id=chat_id)
+
+            record = agent.store.get(chat_id)
+            if record is None:
+                self.fail("session record was not persisted")
+            self.assertEqual(77, record.last_prompt_tokens)
+            self.assertGreater(record.last_estimated_tokens, 0)
+            self.assertEqual(
+                (77, record.last_estimated_tokens),
+                agent.store.context_usage(chat_id, agent._context_fingerprint()),
+            )
+
+    async def test_provider_prompt_usage_calibrates_transcript_compaction(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            store_root = Path(temp) / "sessions"
+            store = SessionStore(store_root)
+            agent = Agent(
+                model="test",
+                workspace=temp,
+                store=store,
+                max_context=10_000,
+                compact_rate=0.8,
+            )
+            llm = CompactionLLM()
+            agent._llm = llm
+            chat_id = agent.new_chat()
+            history = agent.store.cache(chat_id)
+            history.extend(
+                message
+                for index in range(6)
+                for message in (
+                    Message(role="user", content=f"question {index}"),
+                    Message(role="assistant", content=f"answer {index}"),
+                )
+            )
+            estimated = estimate_message_tokens(history)
+            fingerprint = agent._context_fingerprint()
+            agent.store.set_context_usage(
+                chat_id,
+                prompt_tokens=9000,
+                estimated_tokens=estimated,
+                fingerprint=fingerprint,
+            )
+
+            await agent._compact_history(chat_id, history, "next")
+
+            self.assertEqual(1, len(llm.calls))
+            self.assertIsNone(agent.store.context_usage(chat_id, fingerprint))
+
+    async def test_context_usage_survives_store_reload(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            store_root = Path(temp) / "sessions"
+            store = SessionStore(store_root)
+            chat_id = store.new_chat().chat_id
+            store.set_context_usage(
+                chat_id,
+                prompt_tokens=1234,
+                estimated_tokens=800,
+                fingerprint="model-tools-prompt",
+            )
+
+            restored = SessionStore(store_root)
+
+            self.assertEqual(
+                (1234, 800),
+                restored.context_usage(chat_id, "model-tools-prompt"),
+            )
+
     async def test_compaction_replaces_jsonl_and_retains_recent_image_and_tool_turn(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             store_root = Path(temp) / "sessions"

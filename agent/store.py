@@ -27,6 +27,9 @@ class SessionRecord:
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
     message_count: int = 0
+    last_prompt_tokens: int = 0
+    last_estimated_tokens: int = 0
+    context_fingerprint: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -36,6 +39,9 @@ class SessionRecord:
             "created_at": self.created_at,
             "updated_at": self.updated_at,
             "message_count": self.message_count,
+            "last_prompt_tokens": self.last_prompt_tokens,
+            "last_estimated_tokens": self.last_estimated_tokens,
+            "context_fingerprint": self.context_fingerprint,
         }
 
     @classmethod
@@ -47,6 +53,9 @@ class SessionRecord:
             created_at=d.get("created_at", 0.0),
             updated_at=d.get("updated_at", 0.0),
             message_count=d.get("message_count", 0),
+            last_prompt_tokens=d.get("last_prompt_tokens", 0),
+            last_estimated_tokens=d.get("last_estimated_tokens", 0),
+            context_fingerprint=d.get("context_fingerprint", ""),
         )
 
 
@@ -230,7 +239,39 @@ class SessionStore:
         cached = self._chat_cache.setdefault(resolved, [])
         cached[:] = messages
         self._write_cursor[resolved] = len(messages)
+        record = self._read_record(resolved) or SessionRecord(chat_id=resolved)
+        record.last_prompt_tokens = 0
+        record.last_estimated_tokens = 0
+        record.context_fingerprint = ""
+        self._write_record(record)
         self._touch_record(resolved, len(messages))
+
+    def set_context_usage(
+        self,
+        chat_id: str,
+        *,
+        prompt_tokens: int,
+        estimated_tokens: int,
+        fingerprint: str,
+    ) -> None:
+        """Persist provider-measured usage alongside its transcript estimate."""
+        resolved = self.resolve(chat_id) or chat_id
+        record = self._read_record(resolved) or SessionRecord(chat_id=resolved)
+        record.last_prompt_tokens = max(0, prompt_tokens)
+        record.last_estimated_tokens = max(0, estimated_tokens)
+        record.context_fingerprint = fingerprint
+        self._write_record(record)
+
+    def context_usage(self, chat_id: str, fingerprint: str) -> tuple[int, int] | None:
+        record = self._read_record(self.resolve(chat_id) or chat_id)
+        if (
+            record is None
+            or not fingerprint
+            or record.context_fingerprint != fingerprint
+            or record.last_prompt_tokens <= 0
+        ):
+            return None
+        return record.last_prompt_tokens, record.last_estimated_tokens
 
     def save_all(self) -> None:
         for chat_id in list(self._chat_cache.keys()):
@@ -240,8 +281,12 @@ class SessionStore:
         rec = self._read_record(chat_id) or SessionRecord(chat_id=chat_id)
         rec.message_count = message_count
         rec.updated_at = time.time()
+        self._write_record(rec)
+
+    def _write_record(self, rec: SessionRecord) -> None:
+        rec.updated_at = time.time()
         with contextlib.suppress(OSError):
-            self._record_path(chat_id).write_text(
+            self._record_path(rec.chat_id).write_text(
                 json.dumps(rec.to_dict(), ensure_ascii=False, indent=2),
                 encoding="utf-8",
             )

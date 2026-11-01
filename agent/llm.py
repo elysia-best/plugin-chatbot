@@ -97,7 +97,7 @@ class LLMClient:
             for t in tools
         ]
 
-    async def complete(  # noqa: C901, PLR0912
+    async def complete(  # noqa: C901, PLR0912, PLR0915
         self,
         messages: list[Message],
         tools: list[Any] | None = None,
@@ -115,6 +115,7 @@ class LLMClient:
             "messages": payload_messages,
             "stream": True,
             "temperature": self.temperature,
+            "stream_options": {"include_usage": True},
         }
         if tools:
             kwargs["tools"] = self._tool_schemas(tools)
@@ -123,7 +124,13 @@ class LLMClient:
         if self.reasoning_effort:
             kwargs["reasoning_effort"] = self.reasoning_effort
 
-        stream = await self._client.chat.completions.create(**kwargs)
+        try:
+            stream = await self._client.chat.completions.create(**kwargs)
+        except Exception as exc:
+            if "stream_options" not in str(exc).casefold():
+                raise
+            kwargs.pop("stream_options")
+            stream = await self._client.chat.completions.create(**kwargs)
 
         content_parts: list[str] = []
         tool_calls: dict[int, ToolCall] = {}
