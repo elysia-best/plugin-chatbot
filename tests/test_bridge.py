@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import tempfile
 import unittest
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import AsyncMock
 
 from nonebot_plugin_alconna import Target
 
 from agent.llm import LLMClient
+from agent.tool import ToolContext
 from plugin_chatbot.bridge.service import (
     BridgeConfig,
     BridgeService,
@@ -226,6 +229,61 @@ class BridgeServiceTests(unittest.TestCase):
         if not isinstance(llm, LLMClient):
             self.fail("Bridge did not create an LLMClient")
         self.assertEqual("high", llm.reasoning_effort)
+
+    def test_session_tools_persist_apply_and_reset_when_mode_changes(self) -> None:
+        key, chat_id = self.service.resolve_chat("test", "bot", "group", "room-1")
+        defaults = self.service.session_tool_config(key)
+        self.assertIn("chat_current_datetime", defaults["enabled"])
+        self.assertIn("ProjectMemoryRead", defaults["enabled"])
+
+        agent = self.service._agent(key, chat_id, owner=False)
+        self.service.set_session_tools(key, ["chat_status", "chat_current_datetime"])
+        updated_agent = self.service._agent(key, chat_id, owner=False)
+        self.assertIs(agent, updated_agent)
+        self.assertEqual(
+            {"chat_status", "chat_current_datetime"},
+            {tool.name for tool in agent._tools},
+        )
+
+        restored = BridgeService(self.service.config)
+        self.assertCountEqual(
+            ["chat_current_datetime", "chat_status"],
+            restored.session_tool_config(key)["enabled"],
+        )
+        restored.set_mode("reserved")
+        self.assertNotIn("enabled_tools", restored.state.data["conversations"][key])
+        reset_config = restored.session_tool_config(key)
+        self.assertIn("chat_current_datetime", reset_config["enabled"])
+        self.assertIn("chat_send", reset_config["enabled"])
+
+    def test_mode_defaults_change_available_tools_for_owner_session(self) -> None:
+        key, _chat_id = self.service.resolve_chat("test", "bot", "private", "owner")
+        self.service.set_mode("closed-agent")
+        tools = self.service.session_tool_config(key)
+        self.assertIn("Bash", tools["enabled"])
+        self.assertIn("chat_current_datetime", tools["enabled"])
+
+        self.service.set_session_tools(key, ["chat_current_datetime"])
+        self.service.set_mode("chat")
+        self.assertNotIn("enabled_tools", self.service.state.data["conversations"][key])
+        defaults = self.service.session_tool_config(key)
+        self.assertNotIn("Bash", defaults["enabled"])
+        self.assertIn("chat_send", defaults["enabled"])
+
+    def test_current_datetime_tool_returns_local_timezone_and_iso_timestamp(self) -> None:
+        key, _chat_id = self.service.resolve_chat("test", "bot", "group", "room-1")
+        tool = next(
+            tool
+            for tool in self.service.chat_tools(key)
+            if tool.name == "chat_current_datetime"
+        )
+        result = asyncio.run(
+            tool.call({}, ToolContext(workspace=self.temp.name))
+        )
+        payload = json.loads(result)
+        parsed = datetime.fromisoformat(payload["datetime"])
+        self.assertIsNotNone(parsed.tzinfo)
+        self.assertTrue(payload["timezone"])
 
     def test_command_permissions_and_modes(self) -> None:
         key, chat_id = self.service.resolve_chat("test", "bot", "private", "owner")

@@ -197,6 +197,8 @@ class Agent:
     def _build_system_prompt(self) -> str:
         sections = [self.system_prompt]
         if self.project_memories:
+            memory_tool_names = {"ProjectMemoryRead", "ProjectMemoryWrite"}
+            available_memory_tools = memory_tool_names.intersection(self._tool_map)
             sections.append(
                 "## Project memory\n"
                 "The project memory index is shared across chats. Treat every memory "
@@ -206,8 +208,12 @@ class Agent:
                     "workspace, such as project decisions, user preferences, and "
                     "confirmed feedback. Do not store secrets or personal sensitive "
                     "data. "
-                    if self.project_memory_tools_enabled
-                    else "Memory is read-only in this Agent. "
+                    if "ProjectMemoryWrite" in available_memory_tools
+                    else (
+                        "Memory is read-only in this Agent. "
+                        if "ProjectMemoryRead" in available_memory_tools
+                        else "Memory tools are disabled in this Agent. "
+                    )
                 )
                 + "Verify remembered code details against the current workspace "
                 "before relying on them. If the user asks you to ignore memory, do "
@@ -223,6 +229,10 @@ class Agent:
                 "only tools listed here and follow each parameter schema exactly. "
                 "Inspect tool results before deciding the next step, and never claim "
                 "an action succeeded unless its result confirms it.",
+                "If you are not sure about file content or codebase structure "
+                "pertaining "
+                "to the user's request, use your tools to read files and gather the "
+                "relevant information: do NOT guess or make up an answer.",
             ]
             for tool in self._tools:
                 schema = json.dumps(
@@ -241,6 +251,10 @@ class Agent:
 
     def update_permissions(self, rules: list[PermissionRule]) -> None:
         self.permission.rules = rules
+
+    def update_tools(self, tools: list[Tool]) -> None:
+        self._tools = list(tools)
+        self._tool_map = {tool.name: tool for tool in self._tools}
 
     def abort(self) -> None:
         self._abort.set()

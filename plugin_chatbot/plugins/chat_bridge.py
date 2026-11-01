@@ -361,6 +361,10 @@ class UpdateRequest(BaseModel):
     value: str
 
 
+class EnabledToolsRequest(BaseModel):
+    enabled: list[str]
+
+
 class ProjectMemoryRequest(BaseModel):
     name: str
     title: str
@@ -390,10 +394,37 @@ async def _set_mode(body: UpdateRequest) -> dict[str, str]:
         raise HTTPException(status_code=422, detail="Invalid mode")
     if body.value == "closed-agent" and not _service.config.owner_ids:
         raise HTTPException(status_code=409, detail="Configure bridge_owner_ids first")
-    _service.state.data["mode"] = body.value
-    _service.agents.clear()
-    _service.state.save()
+    _service.set_mode(cast("Mode", body.value))
     return {"mode": body.value}
+
+
+@_api.get(
+    "/api/conversations/{conversation_key}/tools",
+    dependencies=[Depends(_authorize)],
+)
+async def _session_tools(conversation_key: str) -> dict[str, Any]:
+    try:
+        return _service.session_tool_config(conversation_key)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Conversation not found") from exc
+
+
+@_api.put(
+    "/api/conversations/{conversation_key}/tools",
+    dependencies=[Depends(_authorize)],
+)
+async def _set_session_tools(
+    conversation_key: str, body: EnabledToolsRequest
+) -> dict[str, Any]:
+    lock = _service.locks.setdefault(conversation_key, asyncio.Lock())
+    try:
+        async with lock:
+            _service.set_session_tools(conversation_key, body.enabled)
+            return _service.session_tool_config(conversation_key)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Conversation not found") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @_api.put("/api/silent", dependencies=[Depends(_authorize)])

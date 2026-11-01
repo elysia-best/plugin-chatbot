@@ -44,6 +44,7 @@ Without configured owner IDs or allowlists, only configured owners can use the b
 - `reserved` applies the same safe tool surface and suppresses a response consisting of `[SILENT]`.
 - `reserved2` treats an incoming message as an agent wake-up and sends only messages explicitly emitted through `chat_send`.
 - `closed-agent` accepts only owner private messages and adds this repository's coding tools. Their normal Agent permission rules and approval callback still apply.
+- The console's session table lets administrators choose enabled tools per conversation. New sessions enable all tools available in the current mode; changing modes clears session overrides and restores each session's defaults.
 - `/status`, `/reset`, `/role [name|off]`, `/silent`, `/active`, `/mode <mode>`, and `/approve <yes|no>` are available to permitted chat users; state-changing commands require an owner.
 - Chat targets are allowlisted by group or private peer. Replies are checked for credential-like values and local paths before sending, then split at configured message length.
 - Incoming images are passed to vision-capable OpenAI-compatible models through Alconna's image fetch helper and size-limited inline data. Unsupported media remains an explicit text notice.

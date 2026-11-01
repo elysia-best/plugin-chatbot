@@ -86,6 +86,12 @@ class ProjectMemoryTests(unittest.IsolatedAsyncioTestCase):
                 backend.system_prompt,
             )
             self.assertIn("structured tool calling interface", backend.system_prompt)
+            self.assertIn(
+                "If you are not sure about file content or codebase structure pertaining "
+                "to the user's request, use your tools to read files and gather the "
+                "relevant information: do NOT guess or make up an answer.",
+                backend.system_prompt,
+            )
             self.assertEqual(
                 {tool.name for tool in backend.tools},
                 {tool.name for tool in agent._tools},

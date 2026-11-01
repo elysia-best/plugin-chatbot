@@ -9,12 +9,13 @@ import json
 import re
 import time
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Literal
+from datetime import datetime
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from nonebot_plugin_alconna import Target, UniMessage
 
 from agent import Agent, PermissionRule, SessionStore, Tool, ToolContext
-from agent.memory import ProjectMemoryStore
+from agent.memory import ProjectMemoryStore, project_memory_tools
 from agent.messages import Message
 from agent.tools import builtin_tools
 
@@ -325,27 +326,87 @@ class BridgeService:
             self.state.save()
         return key, record["chat_id"]
 
+    def available_session_tools(self, key: str) -> list[Tool]:
+        record = self.state.data["conversations"].get(key)
+        if record is None:
+            raise KeyError(key)
+        tools = self.chat_tools(key)
+        if (
+            self.state.data["mode"] == "closed-agent"
+            and record.get("kind") == "private"
+            and self.is_admin("", str(record.get("peer_id", "")))
+        ):
+            tools.extend(builtin_tools())
+        tools.extend(project_memory_tools(self.memories))
+        return tools
+
+    def session_tool_config(self, key: str) -> dict[str, Any]:
+        tools = self.available_session_tools(key)
+        names = [tool.name for tool in tools]
+        record = self.state.data["conversations"][key]
+        configured = record.get("enabled_tools")
+        enabled = [name for name in names if name in configured] if isinstance(
+            configured, list
+        ) else names
+        return {
+            "mode": self.state.data["mode"],
+            "enabled": enabled,
+            "tools": [
+                {
+                    "name": tool.name,
+                    "description": tool.description,
+                    "enabled": tool.name in enabled,
+                }
+                for tool in tools
+            ],
+        }
+
+    def set_session_tools(self, key: str, enabled: list[str]) -> None:
+        available = {tool.name for tool in self.available_session_tools(key)}
+        selected = set(enabled)
+        unknown = selected - available
+        if unknown:
+            raise ValueError(f"Unavailable tools: {', '.join(sorted(unknown))}")
+        self.state.data["conversations"][key]["enabled_tools"] = sorted(selected)
+        self.state.save()
+
+    def set_mode(self, mode: Mode) -> None:
+        self.state.data["mode"] = mode
+        for record in self.state.data["conversations"].values():
+            record.pop("enabled_tools", None)
+        self.agents.clear()
+        self.state.save()
+
     def _agent(self, key: str, chat_id: str, *, owner: bool) -> Agent:
         agent = self.agents.get(key)
-        chat_tools = self.chat_tools(key)
+        available_tools = self.available_session_tools(key)
+        configured = self.state.data["conversations"][key].get("enabled_tools")
+        enabled_names = (
+            {name for name in configured if isinstance(name, str)}
+            if isinstance(configured, list)
+            else {tool.name for tool in available_tools}
+        )
+        tools = [tool for tool in available_tools if tool.name in enabled_names]
         permissions = [
-            PermissionRule(tool=tool.name, behavior="allow") for tool in chat_tools
+            PermissionRule(tool=tool.name, behavior="allow")
+            for tool in tools
+            if tool.name.startswith("chat_")
         ]
-        permissions.extend(
-            (
-                PermissionRule(tool="ProjectMemoryRead", behavior="allow"),
+        if any(tool.name == "ProjectMemoryRead" for tool in tools):
+            permissions.append(
+                PermissionRule(tool="ProjectMemoryRead", behavior="allow")
+            )
+        if any(tool.name == "ProjectMemoryWrite" for tool in tools):
+            permissions.append(
                 PermissionRule(
                     tool="ProjectMemoryWrite",
                     behavior="allow" if owner else "deny",
-                ),
+                )
             )
-        )
         if agent is not None:
             agent.update_permissions(permissions)
+            agent.update_tools(tools)
             return agent
-        tools = list(chat_tools)
-        if owner and self.state.data["mode"] == "closed-agent":
-            tools.extend(builtin_tools())
 
         async def ask_callback(question: str) -> bool:
             return await self._request_approval(key, question)
@@ -400,6 +461,7 @@ class BridgeService:
             max_context=self.config.max_context,
             compact_rate=self.config.compact_rate,
             reasoning_effort=self.config.reasoning_effort or None,
+            project_memory_tools_enabled=False,
         )
         agent.load_chat(chat_id)
         self.agents[key] = agent
@@ -437,6 +499,16 @@ class BridgeService:
         async def status(_args: dict[str, Any], _ctx: ToolContext) -> str:
             return json.dumps(
                 {"mode": self.state.data["mode"], "silent": self.state.data["silent"]},
+                ensure_ascii=False,
+            )
+
+        async def current_datetime(_args: dict[str, Any], _ctx: ToolContext) -> str:
+            now = datetime.now().astimezone()
+            return json.dumps(
+                {
+                    "datetime": now.isoformat(timespec="seconds"),
+                    "timezone": now.tzname(),
+                },
                 ensure_ascii=False,
             )
 
@@ -587,6 +659,13 @@ class BridgeService:
                 "Read current bridge mode and status",
                 {"type": "object", "properties": {}, "additionalProperties": False},
                 status,
+                "read",
+            ),
+            Tool(
+                "chat_current_datetime",
+                "Get the current local system date, time, and timezone",
+                {"type": "object", "properties": {}, "additionalProperties": False},
+                current_datetime,
                 "read",
             ),
             Tool(
@@ -1137,9 +1216,7 @@ class BridgeService:
                 return "用法：/mode chat|closed-agent|reserved|reserved2"
             if argument == "closed-agent" and not self.config.owner_ids:
                 return "请先配置 owner ID。"
-            self.state.data["mode"] = argument
-            self.agents.clear()
-            self.state.save()
+            self.set_mode(cast(Mode, argument))
             return f"运行模式已切换为 {argument}。"
         if command == "/approve":
             pending = self.pending_questions.get(key)
