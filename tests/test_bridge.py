@@ -8,6 +8,7 @@ import tempfile
 import unittest
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from nonebot_plugin_alconna import Target
@@ -161,6 +162,39 @@ class BridgeServiceTests(unittest.TestCase):
         self.assertIn("`user_id` 始终是当前发言用户", prompt)
         self.assertIn("`group_openid` 是群标识，不是发言用户标识", prompt)
         self.assertIn("逐条区分用户", prompt)
+        self.assertIn("不是每条消息都必须回复", prompt)
+        self.assertIn("[SILENT]", prompt)
+
+    def test_chat_mode_reads_chat_behavior_prompt(self) -> None:
+        self.service.state.data["simulation_prompts"]["chat"] = "只在有价值时参与"
+        key, chat_id = self.service.resolve_chat("test", "bot", "group", "room-1")
+        prompt = self.service._agent(key, chat_id, owner=False)._build_system_prompt()
+        self.assertIn("只在有价值时参与", prompt)
+
+    def test_chat_mode_suppresses_silent_marker(self) -> None:
+        async def run_test() -> None:
+            usage = SimpleNamespace(prompt_tokens=0, completion_tokens=0, total_tokens=0)
+            result = SimpleNamespace(
+                status="success", text="[SILENT]", usage=usage, tool_calls=[]
+            )
+            agent = SimpleNamespace(run=AsyncMock(return_value=result))
+            self.service._agent = lambda *_args, **_kwargs: agent
+            incoming = IncomingMessage(
+                bot=None,
+                platform="test",
+                bot_id="bot",
+                kind="group",
+                peer_id="room-1",
+                user_id="member",
+                user_name="Member",
+                text="这条不用回复",
+                target=Target("room-1"),
+            )
+
+            self.assertEqual("", await self.service._process_message(incoming))
+            agent.run.assert_awaited_once()
+
+        asyncio.run(run_test())
 
     def test_group_messages_in_batch_share_one_agent_request(self) -> None:
         async def run_test() -> None:

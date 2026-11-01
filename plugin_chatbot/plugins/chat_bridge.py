@@ -331,10 +331,8 @@ async def _status() -> dict[str, Any]:
 async def _set_simulation_prompt(
     mode: str, body: SimulationPromptRequest
 ) -> dict[str, str]:
-    if mode not in {"reserved", "reserved2"}:
-        raise HTTPException(
-            status_code=422, detail="Mode must be reserved or reserved2"
-        )
+    if mode not in {"chat", "reserved", "reserved2"}:
+        raise HTTPException(status_code=422, detail="Unsupported mode")
     if len(body.value) > MAX_SIMULATION_PROMPT_CHARS:
         raise HTTPException(status_code=422, detail="Simulation prompt is too long")
     _service.state.data["simulation_prompts"][mode] = body.value

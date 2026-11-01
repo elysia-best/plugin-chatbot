@@ -114,7 +114,7 @@ class BridgeState:
             "slang_settings": {},
             "voice_sends": [],
             "outbound_sends": {},
-            "simulation_prompts": {"reserved": "", "reserved2": ""},
+            "simulation_prompts": {"chat": "", "reserved": "", "reserved2": ""},
         }
         try:
             loaded = json.loads(self.path.read_text(encoding="utf-8"))
@@ -134,7 +134,7 @@ class BridgeState:
             ("initial_prompts", {}),
             ("voice_sends", []),
             ("outbound_sends", {}),
-            ("simulation_prompts", {"reserved": "", "reserved2": ""}),
+            ("simulation_prompts", {"chat": "", "reserved": "", "reserved2": ""}),
         ):
             if not isinstance(self.data.get(key), type(value)):
                 self.data[key] = value
@@ -549,6 +549,13 @@ class BridgeService:
             "群标识。群聊合并消息会重复附带每位发言者各自的元数据和 `[user_id]` 标记，"
             "必须逐条"
             "区分用户，不要把群名或群标识当作发送者。"
+            "\n\n【群聊参与规则】\n"
+            "群聊不是每条消息都必须回复。被 @ 或直接提到小西琳、西琳、"
+            "魔法少女时必须回复；"
+            "没有被点名时，只有确实能自然接上话题、补充有价值内容或参与玩笑时才主动参与。"
+            "不要为了证明自己在线而逐条回应。没有合适内容时，必须只输出 [SILENT]，"
+            "不要附加任何文字。[SILENT] 是内部静默标记，不得发送给群友。"
+            "私聊或明确点名时不要使用 [SILENT]。"
         )
         simulation_prompt = self.state.data["simulation_prompts"].get(
             self.state.data["mode"], ""
@@ -1256,7 +1263,7 @@ class BridgeService:
                 return "处理消息时发生错误。"
             if mode == "reserved2":
                 return ""
-            if mode == "reserved" and result.text.strip() == "[SILENT]":
+            if result.text.strip() == "[SILENT]":
                 return ""
             problem = audit_reply(result.text)
             if problem:
