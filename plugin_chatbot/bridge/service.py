@@ -337,17 +337,30 @@ class BridgeService:
             and self.is_admin("", str(record.get("peer_id", "")))
         ):
             tools.extend(builtin_tools())
+        elif self.state.data["mode"] in {"chat", "reserved", "reserved2"}:
+            tools.extend(tool for tool in builtin_tools() if tool.name == "WebSearch")
         tools.extend(project_memory_tools(self.memories))
         return tools
 
     def session_tool_config(self, key: str) -> dict[str, Any]:
-        tools = self.available_session_tools(key)
-        names = [tool.name for tool in tools]
+        active_tools = self.available_session_tools(key)
+        active_names = {tool.name for tool in active_tools}
         record = self.state.data["conversations"][key]
+        tools = list(active_tools)
+        if (
+            self.state.data["mode"] != "closed-agent"
+            and record.get("kind") == "private"
+            and self.is_admin("", str(record.get("peer_id", "")))
+        ):
+            tools.extend(
+                tool for tool in builtin_tools() if tool.name not in active_names
+            )
+        names = [tool.name for tool in tools]
         configured = record.get("enabled_tools")
         enabled = [name for name in names if name in configured] if isinstance(
             configured, list
-        ) else names
+        ) else [name for name in names if name in active_names]
+        enabled = [name for name in enabled if name in active_names]
         return {
             "mode": self.state.data["mode"],
             "enabled": enabled,
@@ -356,6 +369,7 @@ class BridgeService:
                     "name": tool.name,
                     "description": tool.description,
                     "enabled": tool.name in enabled,
+                    "available": tool.name in active_names,
                 }
                 for tool in tools
             ],
@@ -390,7 +404,7 @@ class BridgeService:
         permissions = [
             PermissionRule(tool=tool.name, behavior="allow")
             for tool in tools
-            if tool.name.startswith("chat_")
+            if tool.name.startswith("chat_") or tool.name == "WebSearch"
         ]
         if any(tool.name == "ProjectMemoryRead" for tool in tools):
             permissions.append(

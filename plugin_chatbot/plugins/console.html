@@ -21,6 +21,7 @@
     dialog::backdrop { background:#0008; }
     .tool-option { display:grid; grid-template-columns:auto minmax(0,1fr); gap:10px; padding:8px 0; border-bottom:1px solid #8884; }
     .tool-option small { display:block; opacity:.75; }
+    .tool-option input:disabled + span { opacity:.55; }
     .hidden { display:none; }
   </style>
 </head>
@@ -40,6 +41,7 @@
   <section id="ops" class="hidden"><h2>活动日志</h2><pre id="activity"></pre></section>
   <section id="tools" class="hidden"><h2>工具参考</h2><pre>chat_status：查询模式与静默状态
 chat_current_datetime：查询机器人运行主机的本地日期、时间与时区
+WebSearch：使用 Brave Search 查询互联网（需配置 BRAVE_API_KEY）
 chat_history：读取当前会话近期消息
 chat_send：向当前聊天发送内容（受审计和准入限制）
 chat_wait：等待一条新消息
@@ -81,7 +83,7 @@ document.querySelector('#upload-voice').onclick=async()=>{const file=document.qu
 document.querySelector('#add-slang').onclick=async()=>{try{await api('/api/slang','POST',{term:document.querySelector('#term').value,meaning:document.querySelector('#meaning').value});await refreshSlang()}catch(e){note(e.message)}};
 document.addEventListener('change',async e=>{if(e.target.dataset.status){try{await api('/api/slang/'+e.target.dataset.status,'PATCH',{status:e.target.value})}catch(err){note(err.message)}}});
 let toolConversationKey='';
-const openSessionTools=async key=>{try{const config=await api('/api/conversations/'+encodeURIComponent(key)+'/tools');toolConversationKey=key;document.querySelector('#tool-dialog-mode').textContent=`模式：${config.mode}；未单独配置的工具默认全部启用。`;document.querySelector('#tool-options').innerHTML=config.tools.map(t=>`<label class="tool-option"><input type="checkbox" value="${esc(t.name)}" ${t.enabled?'checked':''}><span><strong>${esc(t.name)}</strong><small>${esc(t.description)}</small></span></label>`).join('');document.querySelector('#tool-dialog').showModal()}catch(err){note(err.message)}};
+const openSessionTools=async key=>{try{const config=await api('/api/conversations/'+encodeURIComponent(key)+'/tools');toolConversationKey=key;document.querySelector('#tool-dialog-mode').textContent=`模式：${config.mode}；显示此会话跨模式可用的完整工具清单。未单独配置时，默认启用当前模式可用的工具。`;document.querySelector('#tool-options').innerHTML=config.tools.map(t=>`<label class="tool-option"><input type="checkbox" value="${esc(t.name)}" ${t.available&&t.enabled?'checked':''} ${t.available?'':'disabled'}><span><strong>${esc(t.name)}</strong><small>${esc(t.description)} · ${t.available?'当前模式可用':'当前模式不可用'}</small></span></label>`).join('');document.querySelector('#tool-dialog').showModal()}catch(err){note(err.message)}};
 document.querySelector('#save-session-tools').onclick=async()=>{const enabled=[...document.querySelectorAll('#tool-options input:checked')].map(input=>input.value);try{await api('/api/conversations/'+encodeURIComponent(toolConversationKey)+'/tools','PUT',{enabled});document.querySelector('#tool-dialog').close();note('会话工具设置已保存')}catch(err){note(err.message)}};
 document.querySelector('#cancel-session-tools').onclick=()=>document.querySelector('#tool-dialog').close();
 document.addEventListener('click',async e=>{const toolButton=e.target.closest('[data-tools]');if(toolButton)await openSessionTools(toolButton.dataset.tools);const edit=e.target.closest('[data-memory-edit]'),remove=e.target.closest('[data-memory-delete]');if(edit){try{const m=await api('/api/memories/'+encodeURIComponent(edit.dataset.memoryEdit));document.querySelector('#memory-name').value=m.name;document.querySelector('#memory-name').readOnly=true;document.querySelector('#memory-title').value=m.title;document.querySelector('#memory-description').value=m.description;document.querySelector('#memory-content').value=m.content;document.querySelector('#memory-type').value=m.type;document.querySelector('#memory-form-title').textContent='编辑记忆';document.querySelector('#save-memory').dataset.editing=m.name}catch(err){note(err.message)}}if(remove&&confirm('删除这条项目记忆？')){try{await api('/api/memories/'+encodeURIComponent(remove.dataset.memoryDelete),'DELETE');clearMemoryForm();await refreshMemories();note('记忆已删除')}catch(err){note(err.message)}}if(e.target.dataset.delete){await api('/api/slang/'+e.target.dataset.delete,'DELETE');await refreshSlang()}if(e.target.dataset.voiceDelete){await api('/api/voices/'+e.target.dataset.voiceDelete,'DELETE');await refreshVoices()}if(e.target.dataset.approval){await api('/api/approvals/'+e.target.dataset.approval,'POST',{approved:e.target.dataset.approved==='true'});await refresh();note('审批已提交')}if(e.target.dataset.reset){await api('/api/conversations/'+e.target.dataset.reset+'/reset','POST');note('会话已重置')}if(e.target.dataset.initial){const value=prompt('设置该会话首次唤醒时注入的说明');if(value!==null){await api('/api/initial-prompt/'+e.target.dataset.initial,'PUT',{value});note('初始提示已保存')}}});

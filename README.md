@@ -40,7 +40,7 @@ Without configured owner IDs or allowlists, only configured owners can use the b
 
 ## Behavior
 
-- `chat` exposes only the current-chat tools and sends a final agent reply.
+- `chat` exposes only the current-chat tools plus read-only `WebSearch` and sends a final agent reply. Configure `BRAVE_API_KEY` in the process environment to enable searches.
 - `reserved` applies the same safe tool surface and suppresses a response consisting of `[SILENT]`.
 - `reserved2` treats an incoming message as an agent wake-up and sends only messages explicitly emitted through `chat_send`.
 - `closed-agent` accepts only owner private messages and adds this repository's coding tools. Their normal Agent permission rules and approval callback still apply.

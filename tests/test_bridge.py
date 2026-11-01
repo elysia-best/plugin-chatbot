@@ -235,8 +235,18 @@ class BridgeServiceTests(unittest.TestCase):
         defaults = self.service.session_tool_config(key)
         self.assertIn("chat_current_datetime", defaults["enabled"])
         self.assertIn("ProjectMemoryRead", defaults["enabled"])
+        self.assertIn("WebSearch", defaults["enabled"])
+        self.assertNotIn("Bash", defaults["enabled"])
 
         agent = self.service._agent(key, chat_id, owner=False)
+        self.assertIn("WebSearch", {tool.name for tool in agent._tools})
+        self.assertEqual(
+            "allow",
+            agent._check_permission(
+                next(tool for tool in agent._tools if tool.name == "WebSearch"),
+                {"query": "test"},
+            ),
+        )
         self.service.set_session_tools(key, ["chat_status", "chat_current_datetime"])
         updated_agent = self.service._agent(key, chat_id, owner=False)
         self.assertIs(agent, updated_agent)
@@ -258,9 +268,17 @@ class BridgeServiceTests(unittest.TestCase):
 
     def test_mode_defaults_change_available_tools_for_owner_session(self) -> None:
         key, _chat_id = self.service.resolve_chat("test", "bot", "private", "owner")
+        chat_tools = self.service.session_tool_config(key)
+        bash = next(tool for tool in chat_tools["tools"] if tool["name"] == "Bash")
+        self.assertFalse(bash["available"])
+        self.assertNotIn("Bash", chat_tools["enabled"])
+
         self.service.set_mode("closed-agent")
         tools = self.service.session_tool_config(key)
         self.assertIn("Bash", tools["enabled"])
+        self.assertTrue(
+            next(tool for tool in tools["tools"] if tool["name"] == "Bash")["available"]
+        )
         self.assertIn("chat_current_datetime", tools["enabled"])
 
         self.service.set_session_tools(key, ["chat_current_datetime"])
@@ -269,6 +287,11 @@ class BridgeServiceTests(unittest.TestCase):
         defaults = self.service.session_tool_config(key)
         self.assertNotIn("Bash", defaults["enabled"])
         self.assertIn("chat_send", defaults["enabled"])
+
+    def test_session_tool_catalog_does_not_expose_admin_tools_to_group(self) -> None:
+        key, _chat_id = self.service.resolve_chat("test", "bot", "group", "room-1")
+        tools = self.service.session_tool_config(key)["tools"]
+        self.assertNotIn("Bash", {tool["name"] for tool in tools})
 
     def test_current_datetime_tool_returns_local_timezone_and_iso_timestamp(self) -> None:
         key, _chat_id = self.service.resolve_chat("test", "bot", "group", "room-1")
