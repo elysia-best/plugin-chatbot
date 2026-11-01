@@ -71,6 +71,7 @@ class BridgeConfig:
     slang_cooldown_seconds: int = 300
     input_cost_per_million: float = 0.0
     output_cost_per_million: float = 0.0
+    mcp_server_url: str = ""
 
 
 @dataclass
@@ -222,6 +223,11 @@ class BridgeService:
     def __init__(self, config: BridgeConfig) -> None:
         self.config = config
         self.state = BridgeState(config.state_dir)
+        self.mcp_server_url = str(
+            self.state.data.get("mcp_server_url", config.mcp_server_url)
+        ).strip()
+        self.mcp_tools: list[dict[str, Any]] = []
+        self.mcp_error = ""
         saved_slang = self.state.data.get("slang_settings", {})
         if isinstance(saved_slang, dict):
             self.config.slang_enabled = bool(
@@ -331,16 +337,111 @@ class BridgeService:
         if record is None:
             raise KeyError(key)
         tools = self.chat_tools(key)
+        mcp_search_available = any(
+            item.get("name") == "search" for item in self.mcp_tools
+        )
         if (
             self.state.data["mode"] == "closed-agent"
             and record.get("kind") == "private"
             and self.is_admin("", str(record.get("peer_id", "")))
         ):
-            tools.extend(builtin_tools())
+            tools.extend(
+                tool
+                for tool in builtin_tools()
+                if not (mcp_search_available and tool.name == "WebSearch")
+            )
         elif self.state.data["mode"] in {"chat", "reserved", "reserved2"}:
-            tools.extend(tool for tool in builtin_tools() if tool.name == "WebSearch")
+            if not mcp_search_available:
+                tools.extend(
+                    tool for tool in builtin_tools() if tool.name == "WebSearch"
+                )
         tools.extend(project_memory_tools(self.memories))
+        tools.extend(self._mcp_tools())
         return tools
+
+    def _mcp_tools(self) -> list[Tool]:
+        from agent.tool import Tool
+
+        result: list[Tool] = []
+        for item in self.mcp_tools:
+            name = str(item.get("name", ""))
+            schema = item.get("inputSchema")
+            if not name or not isinstance(schema, dict):
+                continue
+            exposed_name = f"mcp__open_websearch__{name}"
+
+            async def invoke(
+                args: dict[str, Any],
+                _ctx: ToolContext,
+                *,
+                tool_name: str = name,
+                server_url: str = self.mcp_server_url,
+            ) -> str:
+                from mcp import ClientSession
+                from mcp.client.streamable_http import streamablehttp_client
+
+                async with (
+                    streamablehttp_client(server_url) as (read, write, _),
+                    ClientSession(read, write) as session,
+                ):
+                    await session.initialize()
+                    response = await session.call_tool(tool_name, args)
+                parts = [getattr(part, "text", "") for part in response.content]
+                text = "\n".join(part for part in parts if part)
+                return text or json.dumps(
+                    response.model_dump(mode="json"), ensure_ascii=False
+                )
+
+            result.append(
+                Tool(
+                    name=exposed_name,
+                    description=str(item.get("description") or f"MCP tool: {name}"),
+                    input_schema=schema,
+                    handler=invoke,
+                    category="net",
+                )
+            )
+        return result
+
+    async def configure_mcp(self, url: str) -> dict[str, Any]:
+        url = url.strip()
+        self.mcp_server_url = url
+        self.state.data["mcp_server_url"] = url
+        self.state.save()
+        self.mcp_tools = []
+        self.mcp_error = ""
+        if url:
+            try:
+                from mcp import ClientSession
+                from mcp.client.streamable_http import streamablehttp_client
+
+                async with (
+                    streamablehttp_client(url) as (read, write, _),
+                    ClientSession(read, write) as session,
+                ):
+                    await session.initialize()
+                    response = await session.list_tools()
+                self.mcp_tools = [
+                    tool.model_dump(mode="json") for tool in response.tools
+                ]
+            except Exception as exc:  # noqa: BLE001
+                self.mcp_error = type(exc).__name__
+        self.agents.clear()
+        return self.mcp_status()
+
+    def mcp_status(self) -> dict[str, Any]:
+        return {
+            "url": self.mcp_server_url,
+            "connected": bool(self.mcp_server_url) and not self.mcp_error,
+            "error": self.mcp_error,
+            "tools": [
+                {
+                    "name": f"mcp__open_websearch__{tool.get('name', '')}",
+                    "description": tool.get("description", ""),
+                }
+                for tool in self.mcp_tools
+            ],
+        }
 
     def session_tool_config(self, key: str) -> dict[str, Any]:
         active_tools = self.available_session_tools(key)
@@ -352,8 +453,14 @@ class BridgeService:
             and record.get("kind") == "private"
             and self.is_admin("", str(record.get("peer_id", "")))
         ):
+            mcp_search_available = any(
+                item.get("name") == "search" for item in self.mcp_tools
+            )
             tools.extend(
-                tool for tool in builtin_tools() if tool.name not in active_names
+                tool
+                for tool in builtin_tools()
+                if tool.name not in active_names
+                and not (mcp_search_available and tool.name == "WebSearch")
             )
         names = [tool.name for tool in tools]
         configured = record.get("enabled_tools")
@@ -404,7 +511,11 @@ class BridgeService:
         permissions = [
             PermissionRule(tool=tool.name, behavior="allow")
             for tool in tools
-            if tool.name.startswith("chat_") or tool.name == "WebSearch"
+            if (
+                tool.name.startswith("chat_")
+                or tool.name == "WebSearch"
+                or tool.name.startswith("mcp__open_websearch__")
+            )
         ]
         if any(tool.name == "ProjectMemoryRead" for tool in tools):
             permissions.append(

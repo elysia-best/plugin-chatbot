@@ -8,7 +8,7 @@ import tempfile
 import unittest
 from datetime import datetime
 from pathlib import Path
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 from nonebot_plugin_alconna import Target
 
@@ -292,6 +292,79 @@ class BridgeServiceTests(unittest.TestCase):
         key, _chat_id = self.service.resolve_chat("test", "bot", "group", "room-1")
         tools = self.service.session_tool_config(key)["tools"]
         self.assertNotIn("Bash", {tool["name"] for tool in tools})
+
+    def test_discovered_mcp_tools_are_session_selectable_and_allowed(self) -> None:
+        key, chat_id = self.service.resolve_chat("test", "bot", "group", "room-1")
+        self.service.mcp_server_url = "http://localhost:3000/mcp"
+        self.service.mcp_tools = [
+            {
+                "name": "search",
+                "description": "Search the web",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {"query": {"type": "string"}},
+                    "required": ["query"],
+                },
+            }
+        ]
+        tool_name = "mcp__open_websearch__search"
+        catalog = self.service.session_tool_config(key)
+        self.assertIn(tool_name, {tool["name"] for tool in catalog["tools"]})
+        self.assertIn(tool_name, catalog["enabled"])
+        self.assertNotIn("WebSearch", {tool["name"] for tool in catalog["tools"]})
+        agent = self.service._agent(key, chat_id, owner=False)
+        tool = next(tool for tool in agent._tools if tool.name == tool_name)
+        self.assertEqual("allow", agent._check_permission(tool, {"query": "test"}))
+
+    def test_mcp_tool_call_uses_discovered_server_tool(self) -> None:
+        self.service.mcp_server_url = "http://localhost:3000/mcp"
+        self.service.mcp_tools = [
+            {
+                "name": "search",
+                "description": "Search the web",
+                "inputSchema": {"type": "object"},
+            }
+        ]
+
+        class FakeSession:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return None
+
+            async def initialize(self):
+                return None
+
+            async def call_tool(self, name, arguments):
+                self.called = (name, arguments)
+                return type(
+                    "Result", (), {"content": [type("Text", (), {"text": "Found it"})()]}
+                )()
+
+        class FakeTransport:
+            async def __aenter__(self):
+                return object(), object(), lambda: None
+
+            async def __aexit__(self, *_args):
+                return None
+
+        session = FakeSession()
+        with (
+            patch("mcp.ClientSession", return_value=session),
+            patch(
+                "mcp.client.streamable_http.streamablehttp_client",
+                return_value=FakeTransport(),
+            ) as transport,
+        ):
+            tool = self.service._mcp_tools()[0]
+            result = asyncio.run(
+                tool.call({"query": "MCP"}, ToolContext(workspace=self.temp.name))
+            )
+
+        self.assertEqual("Found it", result)
+        self.assertEqual(("search", {"query": "MCP"}), session.called)
+        transport.assert_called_once_with("http://localhost:3000/mcp")
 
     def test_current_datetime_tool_returns_local_timezone_and_iso_timestamp(self) -> None:
         key, _chat_id = self.service.resolve_chat("test", "bot", "group", "room-1")

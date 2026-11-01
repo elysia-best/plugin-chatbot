@@ -29,6 +29,7 @@ MAX_INITIAL_PROMPT_CHARS = 4000
 MAX_SLANG_TERM_CHARS = 100
 MAX_IMAGES_PER_MESSAGE = 8
 MAX_SIMULATION_PROMPT_CHARS = 20_000
+MAX_MCP_URL_CHARS = 2000
 MESSAGE_LOG_PREVIEW_CHARS = 120
 
 
@@ -52,6 +53,7 @@ class Settings(BaseModel):
     compact_rate: float = 0.8
     bridge_max_media_bytes: int = 8 * 1024 * 1024
     bridge_console_token: str = ""
+    bridge_mcp_server_url: str = ""
     bridge_voice_dir: str = ""
     bridge_voice_max_bytes: int = 20 * 1024 * 1024
     bridge_voice_max_text_chars: int = 500
@@ -122,6 +124,7 @@ _service = BridgeService(
             1024, min(_settings.bridge_max_media_bytes, 32 * 1024 * 1024)
         ),
         console_token=_settings.bridge_console_token,
+        mcp_server_url=_settings.bridge_mcp_server_url,
         voice_dir=Path(_settings.bridge_voice_dir).resolve()
         if _settings.bridge_voice_dir
         else None,
@@ -359,6 +362,18 @@ async def _resolve_approval(
 
 class UpdateRequest(BaseModel):
     value: str
+
+
+@_api.get("/api/mcp", dependencies=[Depends(_authorize)])
+async def _mcp_status() -> dict[str, Any]:
+    return _service.mcp_status()
+
+
+@_api.put("/api/mcp", dependencies=[Depends(_authorize)])
+async def _configure_mcp(body: UpdateRequest) -> dict[str, Any]:
+    if len(body.value) > MAX_MCP_URL_CHARS:
+        raise HTTPException(status_code=422, detail="MCP URL is too long")
+    return await _service.configure_mcp(body.value)
 
 
 class EnabledToolsRequest(BaseModel):
@@ -781,6 +796,9 @@ _wake_tasks: list[asyncio.Task[None]] = []
 
 @_driver.on_startup
 async def _start_wake_scheduler() -> None:
+    if _service.mcp_server_url:
+        await _service.configure_mcp(_service.mcp_server_url)
+
     async def run() -> None:
         while True:
             await asyncio.sleep(5)

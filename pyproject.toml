@@ -8,6 +8,7 @@ dependencies = [
     "nonebot-plugin-alconna>=0.62.1",
     "nonebot2[fastapi]>=2.5.0",
     "openai>=3.42.0",
+    "mcp>=1.0,<2.0",
     "pyttsx3>=2.90",
 ]
 
