@@ -6,7 +6,7 @@ import re
 from pathlib import Path  # noqa: TC003
 
 _NAME_RE = re.compile(r"^[\w\-一-鿿]{1,64}$")
-_MODE_TAGS = re.compile(
+_LEGACY_MODE_TAGS = re.compile(
     r"[\[〔（(]\s*(?:一代|1\s*代|v1|reserved|二代|2\s*代|v2|reserved2)\s*[\]〕）)]",  # noqa: RUF001
     re.IGNORECASE,
 )
@@ -65,41 +65,20 @@ class RoleCards:
     def delete(self, name: str) -> None:
         self._path(name).unlink(missing_ok=False)
 
-    def render(self, name: str | None, mode: str) -> str:
+    def render(self, name: str | None) -> str:
         if not name:
             return ""
         text = self.get(name)
-        wanted = {"reserved": "v1", "reserved2": "v2"}.get(mode)
-        output: list[str] = []
-        current_mode = "all"
-        for source_line in text.splitlines():
-            line = source_line
-            if source_line.startswith("#"):
-                tag = _MODE_TAGS.search(source_line)
-                current_mode = "all"
-                if tag:
-                    marker = tag.group().casefold()
-                    current_mode = (
-                        "v1"
-                        if any(x in marker for x in ("一代", "1", "v1", "reserved"))
-                        and "reserved2" not in marker
-                        else "v2"
-                    )
-                    line = _MODE_TAGS.sub("", line).rstrip()
-            if current_mode in ("all", wanted):
-                output.append(line)
-        return "\n".join(output).strip()
+        return "\n".join(
+            _LEGACY_MODE_TAGS.sub("", line).rstrip() if line.startswith("#") else line
+            for line in text.splitlines()
+        ).strip()
 
     @staticmethod
     def inspect(content: str) -> dict[str, object]:
-        sections: list[dict[str, object]] = []
-        for line in content.splitlines():
-            if line.startswith("#"):
-                tag = _MODE_TAGS.search(line)
-                sections.append(
-                    {
-                        "heading": _MODE_TAGS.sub("", line).strip(),
-                        "mode": tag.group() if tag else "all",
-                    }
-                )
+        sections = [
+            _LEGACY_MODE_TAGS.sub("", line).strip()
+            for line in content.splitlines()
+            if line.startswith("#")
+        ]
         return {"chars": len(content), "sections": sections}

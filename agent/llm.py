@@ -150,9 +150,6 @@ class LLMClient:
                 continue
             choice = chunk.choices[0]
             delta = choice.delta
-            if getattr(delta, "reasoning_content", None):
-                # 跳过推理内容（deepseek 等）
-                pass
             if getattr(delta, "content", None):
                 content_parts.append(delta.content)
             for tc in getattr(delta, "tool_calls", None) or []:

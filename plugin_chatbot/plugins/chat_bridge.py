@@ -28,7 +28,6 @@ MAX_ROLE_CHARS = 6000
 MAX_INITIAL_PROMPT_CHARS = 4000
 MAX_SLANG_TERM_CHARS = 100
 MAX_IMAGES_PER_MESSAGE = 8
-MAX_SIMULATION_PROMPT_CHARS = 20_000
 MAX_MCP_URL_CHARS = 2000
 MESSAGE_LOG_PREVIEW_CHARS = 120
 
@@ -72,10 +71,8 @@ def _as_ids(value: Any) -> set[str]:
     if isinstance(value, str):
         text = value.strip()
         if text.startswith("["):
-            try:
+            with contextlib.suppress(json.JSONDecodeError):
                 value = json.loads(text)
-            except json.JSONDecodeError:
-                pass
         if isinstance(value, str):
             return {part.strip() for part in value.split(",") if part.strip()}
     if isinstance(value, int) and not isinstance(value, bool):
@@ -110,7 +107,7 @@ _service = BridgeService(
             "Mode",
             _settings.bridge_mode
             if _settings.bridge_mode
-            in {"chat", "closed-agent", "reserved", "reserved2"}
+            in {"chat", "agent"}
             else "chat",
         ),
         max_message_chars=max(100, min(_settings.bridge_max_message_chars, 4000)),
@@ -327,25 +324,6 @@ async def _status() -> dict[str, Any]:
     return _service.snapshot()
 
 
-@_api.put("/api/simulation-prompts/{mode}", dependencies=[Depends(_authorize)])
-async def _set_simulation_prompt(
-    mode: str, body: SimulationPromptRequest
-) -> dict[str, str]:
-    if mode not in {"chat", "reserved", "reserved2"}:
-        raise HTTPException(status_code=422, detail="Unsupported mode")
-    if len(body.value) > MAX_SIMULATION_PROMPT_CHARS:
-        raise HTTPException(status_code=422, detail="Simulation prompt is too long")
-    _service.state.data["simulation_prompts"][mode] = body.value
-    _service.state.save()
-    _service.agents.clear()
-    return {"mode": mode}
-
-
-@_api.get("/api/simulation-prompts", dependencies=[Depends(_authorize)])
-async def _simulation_prompts() -> dict[str, str]:
-    return _service.state.data["simulation_prompts"]
-
-
 @_api.post("/api/approvals/{conversation_key}", dependencies=[Depends(_authorize)])
 async def _resolve_approval(
     conversation_key: str, body: dict[str, bool]
@@ -397,15 +375,11 @@ class SlangSettingsRequest(BaseModel):
     cooldown_seconds: int
 
 
-class SimulationPromptRequest(BaseModel):
-    value: str
-
-
 @_api.put("/api/mode", dependencies=[Depends(_authorize)])
 async def _set_mode(body: UpdateRequest) -> dict[str, str]:
-    if body.value not in {"chat", "closed-agent", "reserved", "reserved2"}:
+    if body.value not in {"chat", "agent"}:
         raise HTTPException(status_code=422, detail="Invalid mode")
-    if body.value == "closed-agent" and not _service.config.owner_ids:
+    if body.value == "agent" and not _service.config.owner_ids:
         raise HTTPException(status_code=409, detail="Configure bridge_owner_ids first")
     _service.set_mode(cast("Mode", body.value))
     return {"mode": body.value}
@@ -544,9 +518,7 @@ async def _roles() -> dict[str, Any]:
 
 
 @_api.get("/api/roles/{name}", dependencies=[Depends(_authorize)])
-async def _get_role(name: str, mode: str = "chat") -> dict[str, Any]:
-    if mode not in {"chat", "closed-agent", "reserved", "reserved2"}:
-        raise HTTPException(status_code=422, detail="Invalid mode")
+async def _get_role(name: str) -> dict[str, Any]:
     try:
         content = _service.roles.get(name)
     except FileNotFoundError as exc:
@@ -556,7 +528,7 @@ async def _get_role(name: str, mode: str = "chat") -> dict[str, Any]:
     return {
         "name": name,
         "content": content,
-        "rendered": _service.roles.render(name, mode),
+        "rendered": _service.roles.render(name),
         **_service.roles.inspect(content),
     }
 
@@ -789,30 +761,14 @@ async def _console() -> FileResponse:
 
 cast("Any", _driver).server_app.mount("/chat-agent", _api)
 
-_wake_tasks: list[asyncio.Task[None]] = []
-
-
 @_driver.on_startup
-async def _start_wake_scheduler() -> None:
+async def _initialize_bridge() -> None:
     if _service.mcp_server_url:
         await _service.configure_mcp(_service.mcp_server_url)
-
-    async def run() -> None:
-        while True:
-            await asyncio.sleep(5)
-            if _service.state.data["mode"] == "reserved2":
-                await _service.run_due_wakes()
-
-    _wake_tasks.append(asyncio.create_task(run(), name="chat-agent-wake-scheduler"))
 
 
 @_driver.on_shutdown
 async def _close_agents() -> None:
-    for task in _wake_tasks:
-        task.cancel()
-    for task in _wake_tasks:
-        with contextlib.suppress(asyncio.CancelledError):
-            await task
     for task in _service.slang_tasks:
         task.cancel()
     if _service.slang_tasks:

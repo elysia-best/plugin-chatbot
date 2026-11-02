@@ -8,7 +8,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 from agent.llm import LLMResponse
-from agent.messages import Message
+from agent.messages import Message, ToolCall
 from agent.store import SessionStore
 from plugin_chatbot.bridge.memes import MemeLibrary, decode_image_data_url
 from plugin_chatbot.bridge.roles import RoleCards
@@ -17,6 +17,27 @@ from plugin_chatbot.bridge.voice import VoiceLibrary
 
 
 class MultimodalMessageTests(unittest.TestCase):
+    def test_tool_call_parses_openai_and_stored_shapes(self) -> None:
+        openai_call = {
+            "id": "call-1",
+            "type": "function",
+            "function": {"name": "Read", "arguments": '{"path":"a.txt"}'},
+        }
+        stored_call = {
+            "id": "call-2",
+            "name": "Write",
+            "arguments": {"path": "b.txt"},
+        }
+
+        self.assertEqual(
+            ToolCall("call-1", "Read", {"path": "a.txt"}),
+            ToolCall.from_openai(openai_call),
+        )
+        self.assertEqual(
+            ToolCall("call-2", "Write", {"path": "b.txt"}),
+            ToolCall.from_openai(stored_call),
+        )
+
     def test_image_content_round_trips_and_keeps_openai_shape(self) -> None:
         message = Message(
             role="user",
@@ -58,8 +79,11 @@ class RoleCardTests(unittest.TestCase):
             roles = RoleCards(Path(temp))
             source = "# Common\nhello\n## One [v1]\nfirst\n## Two [v2]\nsecond"
             roles.save("test", source, create=True)
-            self.assertIn("first", roles.render("test", "reserved"))
-            self.assertNotIn("second", roles.render("test", "reserved"))
+            rendered = roles.render("test")
+            self.assertIn("first", rendered)
+            self.assertIn("second", rendered)
+            self.assertNotIn("[v1]", rendered)
+            self.assertNotIn("[v2]", rendered)
             roles.copy("test", "copy")
             roles.rename("copy", "renamed")
             self.assertEqual(source, roles.get("renamed"))

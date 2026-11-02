@@ -40,17 +40,16 @@ Without configured owner IDs or allowlists, only configured owners can use the b
 
 ## Behavior
 
-- `chat` exposes only the current-chat tools plus read-only `WebSearch` and sends a final agent reply. Configure `BRAVE_API_KEY` in the process environment to enable searches.
-- `reserved` applies the same safe tool surface and suppresses a response consisting of `[SILENT]`.
-- `reserved2` treats an incoming message as an agent wake-up and sends only messages explicitly emitted through `chat_send`.
-- `closed-agent` accepts only owner private messages and adds this repository's coding tools. Their normal Agent permission rules and approval callback still apply.
+- `chat` exposes conversation tools and read-only `WebSearch`, then sends the final reply. Configure `BRAVE_API_KEY` in the process environment to enable searches.
+- `agent` accepts only owner private messages and adds this repository's coding tools. Normal Agent permission rules and the approval callback still apply.
+- Both modes include the configured persona or active role card in the system prompt. Agent mode also keeps that persona while using coding tools.
 - The console's session table lets administrators choose enabled tools per conversation. New sessions enable all tools available in the current mode; changing modes clears session overrides and restores each session's defaults.
 - `/status`, `/reset`, `/role [name|off]`, `/silent`, `/active`, `/mode <mode>`, and `/approve <yes|no>` are available to permitted chat users; state-changing commands require an owner.
 - Chat targets are allowlisted by group or private peer. Replies are checked for credential-like values and local paths before sending, then split at configured message length.
 - Incoming images are passed to vision-capable OpenAI-compatible models through Alconna's image fetch helper and size-limited inline data. Unsupported media remains an explicit text notice.
 - Speech uses a confined local audio library and offline `pyttsx3`; install `pyttsx3` plus a system speech engine to use synthesis. Adapters that cannot send audio return an error.
 - Group slang extraction is rate-limited, researches candidates with the Agent's `WebSearch` / `WebFetch` tools, and leaves every result for administrator review before prompt injection.
-- The console provides simulation prompts, role-card CRUD and preview, project-memory management, initial prompts, approvals, conversation reset, activity, token and estimated-cost records, slang review, and audio-library management. Set input/output cost rates per million tokens to enable cost estimates.
+- The console provides persona and role-card management, project-memory management, initial prompts, approvals, conversation reset, activity, token and estimated-cost records, slang review, and audio-library management. Set input/output cost rates per million tokens to enable cost estimates.
 
 Bridge persistence is separate from the Agent's normal coding sessions. Message transport always goes through Alconna abstractions; features such as native reply references depend on the adapter's exported segment support.
 

@@ -24,8 +24,19 @@ class ToolCall:
 
     @classmethod
     def from_openai(cls, raw: Any) -> "ToolCall":
-        args: dict[str, Any] = {}
-        raw_args = getattr(raw, "arguments", None) or getattr(raw, "function", None)
+        if isinstance(raw, dict):
+            function = raw.get("function") or {}
+            raw_args = raw.get("arguments", function.get("arguments"))
+            name = raw.get("name") or function.get("name", "")
+            call_id = raw.get("id", "")
+        else:
+            function = getattr(raw, "function", None)
+            raw_args = getattr(raw, "arguments", None)
+            if raw_args is None and function is not None:
+                raw_args = getattr(function, "arguments", None)
+            name = getattr(function, "name", None) or getattr(raw, "name", "")
+            call_id = getattr(raw, "id", "")
+
         if isinstance(raw_args, str):
             try:
                 args = json.loads(raw_args) if raw_args else {}
@@ -33,11 +44,11 @@ class ToolCall:
                 args = {}
         elif isinstance(raw_args, dict):
             args = raw_args
+        else:
+            args = {}
         return cls(
-            id=getattr(raw, "id", "") or "",
-            name=getattr(getattr(raw, "function", None), "name", None)
-            or getattr(raw, "name", "")
-            or "",
+            id=call_id or "",
+            name=name or "",
             arguments=args,
         )
 
@@ -97,8 +108,6 @@ class Message:
         if raw.get("tool_calls"):
             tool_calls = [
                 ToolCall.from_openai(tc)
-                if not isinstance(tc, dict)
-                else _toolcall_from_dict(tc)
                 for tc in raw["tool_calls"]
             ]
         return cls(
@@ -134,21 +143,6 @@ class Message:
             tool_call_id=d.get("tool_call_id"),
             name=d.get("name"),
         )
-
-
-def _toolcall_from_dict(d: dict[str, Any]) -> ToolCall:
-    fn = d.get("function", {}) or {}
-    args = fn.get("arguments", {})
-    if isinstance(args, str):
-        try:
-            args = json.loads(args) if args else {}
-        except json.JSONDecodeError:
-            args = {}
-    return ToolCall(
-        id=d.get("id", ""),
-        name=fn.get("name", "") or d.get("name", ""),
-        arguments=args or {},
-    )
 
 
 def _json_dumps(obj: Any) -> str:

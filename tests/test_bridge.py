@@ -18,6 +18,7 @@ from agent.tool import ToolContext
 from plugin_chatbot.bridge.service import (
     BridgeConfig,
     BridgeService,
+    BridgeState,
     IncomingMessage,
     audit_reply,
     conversation_key,
@@ -42,6 +43,28 @@ class BridgeServiceTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.temp.cleanup()
+
+    def test_legacy_modes_migrate_to_chat_or_agent_and_drop_simulation_state(self) -> None:
+        root = Path(self.temp.name) / "legacy-state"
+        root.mkdir()
+        state_path = root / "bridge-state.json"
+        state_path.write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "mode": "closed-agent",
+                    "simulation_prompts": {"chat": "old prompt"},
+                    "wake": {"conversation": {"after": 0}},
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        state = BridgeState(root)
+
+        self.assertEqual("agent", state.data["mode"])
+        self.assertNotIn("simulation_prompts", state.data)
+        self.assertNotIn("wake", state.data)
 
     def test_conversation_key_is_stable_and_scoped(self) -> None:
         key = conversation_key("Example", "bot", "group", "42")
@@ -165,11 +188,14 @@ class BridgeServiceTests(unittest.TestCase):
         self.assertIn("不是每条消息都必须回复", prompt)
         self.assertIn("[SILENT]", prompt)
 
-    def test_chat_mode_reads_chat_behavior_prompt(self) -> None:
-        self.service.state.data["simulation_prompts"]["chat"] = "只在有价值时参与"
+    def test_persona_is_injected_in_chat_and_agent_modes(self) -> None:
+        self.service.state.data["role"] = "始终以小西琳的人格回答"
         key, chat_id = self.service.resolve_chat("test", "bot", "group", "room-1")
-        prompt = self.service._agent(key, chat_id, owner=False)._build_system_prompt()
-        self.assertIn("只在有价值时参与", prompt)
+
+        for mode in ("chat", "agent"):
+            self.service.set_mode(mode)
+            prompt = self.service._agent(key, chat_id, owner=False)._build_system_prompt()
+            self.assertIn("始终以小西琳的人格回答", prompt)
 
     def test_chat_mode_suppresses_silent_marker(self) -> None:
         async def run_test() -> None:
@@ -294,7 +320,7 @@ class BridgeServiceTests(unittest.TestCase):
             ["chat_current_datetime", "chat_status"],
             restored.session_tool_config(key)["enabled"],
         )
-        restored.set_mode("reserved")
+        restored.set_mode("agent")
         self.assertNotIn("enabled_tools", restored.state.data["conversations"][key])
         reset_config = restored.session_tool_config(key)
         self.assertIn("chat_current_datetime", reset_config["enabled"])
@@ -307,7 +333,7 @@ class BridgeServiceTests(unittest.TestCase):
         self.assertFalse(bash["available"])
         self.assertNotIn("Bash", chat_tools["enabled"])
 
-        self.service.set_mode("closed-agent")
+        self.service.set_mode("agent")
         tools = self.service.session_tool_config(key)
         self.assertIn("Bash", tools["enabled"])
         self.assertTrue(

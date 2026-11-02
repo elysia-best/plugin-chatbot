@@ -27,7 +27,7 @@ from .voice import VoiceLibrary
 if TYPE_CHECKING:
     from pathlib import Path
 
-Mode = Literal["chat", "closed-agent", "reserved", "reserved2"]
+Mode = Literal["chat", "agent"]
 EVENT_TTL_SECONDS = 300
 VOICE_WINDOW_SECONDS = 3600
 OUTBOUND_WINDOW_SECONDS = 60
@@ -109,12 +109,10 @@ class BridgeState:
             "activity": [],
             "usage": [],
             "slang": [],
-            "wake": {},
             "active_role": None,
             "slang_settings": {},
             "voice_sends": [],
             "outbound_sends": {},
-            "simulation_prompts": {"chat": "", "reserved": "", "reserved2": ""},
         }
         try:
             loaded = json.loads(self.path.read_text(encoding="utf-8"))
@@ -130,14 +128,18 @@ class BridgeState:
             ("slang", []),
             ("activity", []),
             ("usage", []),
-            ("wake", {}),
             ("initial_prompts", {}),
             ("voice_sends", []),
             ("outbound_sends", {}),
-            ("simulation_prompts", {"chat": "", "reserved": "", "reserved2": ""}),
         ):
             if not isinstance(self.data.get(key), type(value)):
                 self.data[key] = value
+        saved_mode = self.data.get("mode")
+        self.data["mode"] = (
+            "agent" if saved_mode in {"agent", "closed-agent"} else "chat"
+        )
+        self.data.pop("wake", None)
+        self.data.pop("simulation_prompts", None)
         self.data["slang"] = [
             row for row in self.data["slang"] if isinstance(row, dict)
         ]
@@ -260,14 +262,7 @@ class BridgeService:
                 )
         if not self.state.path.exists():
             self.state.data["mode"] = config.mode
-            self.state.save()
-        if self.state.data["mode"] not in {
-            "chat",
-            "closed-agent",
-            "reserved",
-            "reserved2",
-        }:
-            self.state.data["mode"] = config.mode
+        self.state.save()
         self.store = SessionStore(config.state_dir / "sessions")
         self.memories = ProjectMemoryStore(config.workspace)
         self.agents: dict[str, Agent] = {}
@@ -341,7 +336,7 @@ class BridgeService:
             item.get("name") == "search" for item in self.mcp_tools
         )
         if (
-            self.state.data["mode"] == "closed-agent"
+            self.state.data["mode"] == "agent"
             and record.get("kind") == "private"
             and self.is_admin("", str(record.get("peer_id", "")))
         ):
@@ -350,11 +345,11 @@ class BridgeService:
                 for tool in builtin_tools()
                 if not (mcp_search_available and tool.name == "WebSearch")
             )
-        elif self.state.data["mode"] in {"chat", "reserved", "reserved2"}:
-            if not mcp_search_available:
-                tools.extend(
-                    tool for tool in builtin_tools() if tool.name == "WebSearch"
-                )
+        elif (
+            self.state.data["mode"] == "chat"
+            and not mcp_search_available
+        ):
+            tools.extend(tool for tool in builtin_tools() if tool.name == "WebSearch")
         tools.extend(project_memory_tools(self.memories))
         tools.extend(self._mcp_tools())
         return tools
@@ -449,7 +444,7 @@ class BridgeService:
         record = self.state.data["conversations"][key]
         tools = list(active_tools)
         if (
-            self.state.data["mode"] != "closed-agent"
+            self.state.data["mode"] != "agent"
             and record.get("kind") == "private"
             and self.is_admin("", str(record.get("peer_id", "")))
         ):
@@ -557,16 +552,11 @@ class BridgeService:
             "不要附加任何文字。[SILENT] 是内部静默标记，不得发送给群友。"
             "私聊或明确点名时不要使用 [SILENT]。"
         )
-        simulation_prompt = self.state.data["simulation_prompts"].get(
-            self.state.data["mode"], ""
-        )
-        if simulation_prompt:
-            system += f"\n\n【当前仿真策略】\n{simulation_prompt}"
         role = self.state.data.get("role")
         active_role = self.state.data.get("active_role")
         if active_role:
             try:
-                role = self.roles.render(str(active_role), str(self.state.data["mode"]))
+                role = self.roles.render(str(active_role))
             except (OSError, ValueError):
                 role = ""
         if role:
@@ -682,15 +672,6 @@ class BridgeService:
                 self.waiters[key] = [
                     item for item in self.waiters.get(key, []) if item is not future
                 ]
-
-        async def set_wake(args: dict[str, Any], _ctx: ToolContext) -> str:
-            delay = max(0, min(int(args.get("delay_seconds", 0)), 86400))
-            self.state.data["wake"][key] = {
-                "after": time.time() + delay,
-                "reason": str(args.get("reason", ""))[:200],
-            }
-            self.state.save()
-            return f"Next wake scheduled in {delay} seconds"
 
         async def list_voices(_args: dict[str, Any], _ctx: ToolContext) -> str:
             return json.dumps(self.voice.list(), ensure_ascii=False)
@@ -836,21 +817,6 @@ class BridgeService:
                 },
                 wait_message,
                 "read",
-            ),
-            Tool(
-                "chat_set_wake",
-                "Set the next simulation wake time",
-                {
-                    "type": "object",
-                    "properties": {
-                        "delay_seconds": {"type": "integer"},
-                        "reason": {"type": "string"},
-                    },
-                    "required": ["delay_seconds"],
-                    "additionalProperties": False,
-                },
-                set_wake,
-                "write",
             ),
             Tool(
                 "chat_list_voices",
@@ -1141,7 +1107,7 @@ class BridgeService:
         )
         try:
             response = await self._process_message(combined)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             for _incoming, future in queued:
                 if not future.done():
                     future.set_exception(exc)
@@ -1199,7 +1165,7 @@ class BridgeService:
             if command_result is not None:
                 return command_result
         mode = self.state.data["mode"]
-        if mode == "closed-agent" and not (
+        if mode == "agent" and not (
             owner and incoming.kind == "private"
         ):
             return ""
@@ -1261,8 +1227,6 @@ class BridgeService:
             self._record_usage(key, result.usage)
             if result.status == "error":
                 return "处理消息时发生错误。"
-            if mode == "reserved2":
-                return ""
             if result.text.strip() == "[SILENT]":
                 return ""
             problem = audit_reply(result.text)
@@ -1301,7 +1265,7 @@ class BridgeService:
         chat_id: str,
         *,
         peer_id: str | None = None,
-    ) -> str | None:  # noqa: C901, PLR0911, PLR0912
+    ) -> str | None:
         parts = text.strip().split(maxsplit=1)
         command = parts[0].casefold()
         argument = parts[1].strip() if len(parts) > 1 else ""
@@ -1344,11 +1308,11 @@ class BridgeService:
             self.state.save()
             return "已恢复响应。"
         if command == "/mode":
-            if argument not in {"chat", "closed-agent", "reserved", "reserved2"}:
-                return "用法：/mode chat|closed-agent|reserved|reserved2"
-            if argument == "closed-agent" and not self.config.owner_ids:
+            if argument not in {"chat", "agent"}:
+                return "用法：/mode chat|agent"
+            if argument == "agent" and not self.config.owner_ids:
                 return "请先配置 owner ID。"
-            self.set_mode(cast(Mode, argument))
+            self.set_mode(cast("Mode", argument))
             return f"运行模式已切换为 {argument}。"
         if command == "/approve":
             pending = self.pending_questions.get(key)
@@ -1361,26 +1325,6 @@ class BridgeService:
             return "当前没有待审批操作。"
         return None
 
-    async def run_due_wakes(self) -> None:
-        """Run persisted simulation wakeups for conversations seen this process."""
-        now = time.time()
-        for key, wake in list(self.state.data["wake"].items()):
-            if wake.get("after", now + 1) > now or key not in self.agents:
-                continue
-            record = self.state.data["conversations"].get(key)
-            if not record or key not in self.targets or key not in self.bots:
-                continue
-            self.state.data["wake"].pop(key, None)
-            self.state.save()
-            lock = self.locks.setdefault(key, asyncio.Lock())
-            async with lock:
-                agent = self.agents[key]
-                result = await agent.run(
-                    "[计划唤醒] " + str(wake.get("reason", "检查会话")),
-                    chat_id=record["chat_id"],
-                )
-                self._record_usage(key, result.usage)
-
     def snapshot(self) -> dict[str, Any]:
         return {
             "mode": self.state.data["mode"],
@@ -1390,7 +1334,6 @@ class BridgeService:
             "activity": self.state.data["activity"][-100:],
             "usage": self.state.data["usage"][-1000:],
             "slang": self.state.data["slang"],
-            "wake": self.state.data["wake"],
             "approvals": [
                 {"conversation": key, "question": question}
                 for key, question in self.approval_prompts.items()
