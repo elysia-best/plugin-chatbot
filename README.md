@@ -74,11 +74,17 @@ npm run build
 
 The management panel now keeps configuration in three layers:
 
-- **Account**: `adapter/platform + bot_id` identifies one connected Bot. Each Bot can have its own plugin parameters, OpenAI-compatible endpoint, model, API key, reasoning effort, and enabled state.
-- **Group**: `adapter/platform + bot_id + group_id` identifies one group attached to one Bot. Group settings can override provider, model, prompt, reply frequency, reasoning effort, cost limit, and selected Skill/MCP/Rules.
-- **Interfaces**: providers, skills, MCP servers, and rules are shared catalogs. Provider records expose a model-discovery action through the console.
+- **Account**: `adapter/platform + bot_id` identifies one connected Bot. Each Bot can have its own OpenAI-compatible endpoint, model, API key, reasoning effort, context fallback, persona template, supplement prompt, and enabled tools.
+- **Group**: `adapter/platform + bot_id + group_id` identifies one group attached to one Bot. Group settings can override provider, model, prompt, reply frequency, reasoning effort, cost limit, and enabled tools.
+- **Interfaces**: providers, skills, MCP servers, rules, and the runtime tool catalog are managed from the console. Provider records expose model discovery and preserve recognized context-window metadata for transcript compression.
 
 Account and group records are stored in `bridge-state.json` under `BRIDGE_STATE_DIR`. Existing environment variables remain as fallback defaults, so an installation can be upgraded without rewriting its NoneBot configuration.
+
+The **人格提示** workbench manages reusable role templates. An account can select
+one template and add a private supplement; a group prompt, when present, fully
+overrides the account persona. The **Tools** tab lists the tools exposed by the
+current bridge mode and lets accounts and groups inherit or restrict their tool
+defaults.
 ## Development checks
 
 ```powershell

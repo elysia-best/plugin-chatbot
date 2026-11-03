@@ -22,6 +22,8 @@ from plugin_chatbot.bridge.service import (
     IncomingMessage,
     audit_reply,
     conversation_key,
+    extract_context_length,
+    normalize_model_records,
     sender_context,
     split_message,
 )
@@ -144,6 +146,124 @@ class BridgeServiceTests(unittest.TestCase):
         self.assertEqual("model-a", self.service.effective_chat_config("onebot", "100", "private", "u")["model"])
         self.assertEqual("group-model", self.service.effective_chat_config("onebot", "100", "group", "room")["model"])
         self.assertEqual("model-b", self.service.effective_chat_config("onebot", "200", "group", "room")["model"])
+
+    def test_state_migrates_plugin_fields_and_normalizes_models(self) -> None:
+        self.service.state.data["accounts"] = [
+            {
+                "id": "a1",
+                "platform": "onebot",
+                "bot_id": "100",
+                "name": "100",
+                "plugin": "legacy",
+                "plugin_config": {"unused": True},
+            }
+        ]
+        self.service.state.data["interfaces"]["providers"] = [
+            {"id": "p1", "models": ["legacy-model"]}
+        ]
+        self.service.state.save()
+        restored = BridgeService(self.service.config)
+        account = restored.state.data["accounts"][0]
+        provider = restored.state.data["interfaces"]["providers"][0]
+        self.assertNotIn("plugin", account)
+        self.assertNotIn("plugin_config", account)
+        self.assertEqual("legacy-model", provider["models"][0]["id"])
+        self.assertIsNone(provider["models"][0]["context_length"])
+
+    def test_persona_template_and_account_supplement_are_used(self) -> None:
+        self.service.roles.save("friendly", "保持友好。", create=True)
+        self.service.state.data["active_role"] = "friendly"
+        self.service.state.data["accounts"] = [
+            {
+                "id": "a1",
+                "platform": "onebot",
+                "bot_id": "100",
+                "persona_role": "friendly",
+                "persona_prompt": "称呼用户为朋友。",
+            }
+        ]
+        config = self.service.effective_chat_config("onebot", "100", "private", "u")
+        self.assertEqual("保持友好。\n\n称呼用户为朋友。", config["system_prompt"])
+        self.service.state.data["groups"] = [
+            {
+                "id": "g1",
+                "platform": "onebot",
+                "bot_id": "100",
+                "group_id": "room",
+                "system_prompt": "只在群里简洁回答。",
+            }
+        ]
+        group_config = self.service.effective_chat_config(
+            "onebot", "100", "group", "room"
+        )
+        self.assertEqual("只在群里简洁回答。", group_config["system_prompt"])
+
+    def test_provider_model_and_context_override_account_defaults(self) -> None:
+        self.service.state.data["accounts"] = [
+            {
+                "id": "a1",
+                "platform": "onebot",
+                "bot_id": "100",
+                "model": "account-model",
+                "context_length": 16_000,
+                "base_url": "https://account.example/v1",
+            }
+        ]
+        self.service.state.data["interfaces"]["providers"] = [
+            {
+                "id": "p1",
+                "name": "Remote",
+                "model": "provider-model",
+                "context_length": 32_000,
+                "base_url": "https://provider.example/v1",
+                "models": [
+                    {"id": "group-model", "context_length": 64_000}
+                ],
+            }
+        ]
+        self.service.state.data["groups"] = [
+            {
+                "id": "g1",
+                "platform": "onebot",
+                "bot_id": "100",
+                "group_id": "room",
+                "provider_id": "p1",
+                "model": "group-model",
+            }
+        ]
+        config = self.service.effective_chat_config("onebot", "100", "group", "room")
+        self.assertEqual("group-model", config["model"])
+        self.assertEqual("https://provider.example/v1", config["base_url"])
+        self.assertEqual(64_000, config["max_context"])
+
+    def test_account_and_group_tool_selection_inherits_and_overrides(self) -> None:
+        self.service.state.data["accounts"] = [
+            {
+                "id": "a1",
+                "platform": "onebot",
+                "bot_id": "100",
+                "enabled_tools": ["chat_status"],
+            }
+        ]
+        key, _chat_id = self.service.resolve_chat("onebot", "100", "group", "room")
+        self.assertEqual(["chat_status"], self.service.inherited_tool_names(key))
+        self.service.state.data["groups"] = [
+            {
+                "id": "g1",
+                "platform": "onebot",
+                "bot_id": "100",
+                "group_id": "room",
+                "enabled_tools": ["chat_current_datetime"],
+            }
+        ]
+        self.assertEqual(["chat_current_datetime"], self.service.inherited_tool_names(key))
+
+    def test_context_metadata_parser_supports_nested_provider_fields(self) -> None:
+        self.assertEqual(128_000, extract_context_length({"metadata": {"max_model_len": "128000"}}))
+        self.assertEqual(
+            [{"id": "alpha", "context_length": 32_000, "context_source": "remote"}],
+            normalize_model_records([{"id": "alpha", "context_window": 32_000}]),
+        )
 
     def test_slang_settings_survive_restart_and_are_bounded(self) -> None:
         self.service.config.slang_enabled = False

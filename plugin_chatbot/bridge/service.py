@@ -31,12 +31,87 @@ Mode = Literal["chat", "agent"]
 EVENT_TTL_SECONDS = 300
 VOICE_WINDOW_SECONDS = 3600
 OUTBOUND_WINDOW_SECONDS = 60
+MIN_CONTEXT_LENGTH = 4096
+MAX_CONTEXT_LENGTH = 2_000_000
+MAX_METADATA_DEPTH = 3
+MODEL_CONTEXT_KEYS = (
+    "context_length",
+    "context_window",
+    "max_context_length",
+    "max_input_tokens",
+    "input_token_limit",
+    "max_model_len",
+)
 _SECRET_RE = re.compile(
     r"(?i)(?:api[_ -]?key|access[_ -]?token|password|passwd|secret)\s*[:=]\s*\S+"
 )
 _LOCAL_PATH_RE = re.compile(
     r'(?i)(?:\b[a-z]:\\[^\s<>"|?*]+|/(?:home|users|private|var|etc)/[^\s]+)'
 )
+
+
+def positive_context_length(value: Any) -> int | None:
+    """Return a bounded positive context length from provider metadata."""
+    try:
+        number = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if MIN_CONTEXT_LENGTH <= number <= MAX_CONTEXT_LENGTH:
+        return number
+    return None
+
+
+def extract_context_length(value: Any, *, depth: int = 0) -> int | None:
+    """Find a known context-window field in a model response object."""
+    if depth > MAX_METADATA_DEPTH:
+        return None
+    if isinstance(value, dict):
+        for key in MODEL_CONTEXT_KEYS:
+            result = positive_context_length(value.get(key))
+            if result is not None:
+                return result
+        for nested in value.values():
+            result = extract_context_length(nested, depth=depth + 1)
+            if result is not None:
+                return result
+    return None
+
+
+def normalize_model_records(models: Any) -> list[dict[str, Any]]:
+    """Normalize legacy model IDs and provider model objects."""
+    if not isinstance(models, list):
+        return []
+    records: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in models:
+        if isinstance(item, str):
+            model_id = item.strip()
+            raw = {}
+        elif isinstance(item, dict):
+            model_id = str(item.get("id") or item.get("name") or "").strip()
+            raw = item
+        else:
+            model_id = str(getattr(item, "id", "") or "").strip()
+            raw = getattr(item, "model_dump", lambda **_: {})()
+        if not model_id or model_id in seen:
+            continue
+        seen.add(model_id)
+        context_length = extract_context_length(raw)
+        records.append(
+            {
+                "id": model_id,
+                "context_length": context_length,
+                "context_source": "remote" if context_length else "fallback",
+            }
+        )
+    return records
+
+
+def model_id(value: Any) -> str:
+    """Normalize a provider default model value to its ID."""
+    if isinstance(value, dict):
+        return str(value.get("id") or "").strip()
+    return str(value or "").strip()
 
 
 @dataclass
@@ -95,7 +170,7 @@ class IncomingMessage:
 class BridgeState:
     """Atomic JSON state with chat-to-agent mappings and administrator settings."""
 
-    def __init__(self, root: Path) -> None:
+    def __init__(self, root: Path) -> None:  # noqa: C901, PLR0912
         self.root = root
         root.mkdir(parents=True, exist_ok=True)
         self.path = root / "bridge-state.json"
@@ -151,6 +226,36 @@ class BridgeState:
         for key in ("providers", "skills", "mcps", "rules"):
             if not isinstance(interfaces.get(key), list):
                 interfaces[key] = []
+        for account in self.data["accounts"]:
+            if not isinstance(account, dict):
+                continue
+            account.pop("plugin", None)
+            account.pop("plugin_config", None)
+            account.setdefault("persona_role", None)
+            account.setdefault("persona_prompt", "")
+            account.setdefault("enabled_tools", None)
+            account.setdefault("context_length", None)
+            if not account.get("name_source"):
+                account["name_source"] = (
+                    "fallback"
+                    if str(account.get("name", "")) == str(account.get("bot_id", ""))
+                    else "manual"
+                )
+        for group in self.data["groups"]:
+            if not isinstance(group, dict):
+                continue
+            group.setdefault("enabled_tools", None)
+            if not group.get("name_source"):
+                group["name_source"] = (
+                    "fallback"
+                    if str(group.get("name", "")) == str(group.get("group_id", ""))
+                    else "manual"
+                )
+        for provider in interfaces["providers"]:
+            if not isinstance(provider, dict):
+                continue
+            provider["models"] = normalize_model_records(provider.get("models", []))
+            provider.setdefault("context_length", None)
         saved_mode = self.data.get("mode")
         self.data["mode"] = (
             "agent" if saved_mode in {"agent", "closed-agent"} else "chat"
@@ -353,19 +458,18 @@ class BridgeService:
             self.group_config(platform, bot_id, peer_id) if kind == "group" else None
         )
         merged: dict[str, Any] = {
-            "model": account.get("model") or self.config.model,
+            "model": model_id(account.get("model")) or self.config.model,
             "base_url": account.get("base_url") or self.config.base_url,
             "api_key": account.get("api_key") or self.config.api_key,
             "reasoning_effort": account.get("reasoning_effort")
             or self.config.reasoning_effort,
-            "system_prompt": account.get("persona_prompt") or "",
+            "system_prompt": self._account_persona(account),
             "cost_limit": account.get("cost_limit"),
+            "max_context": positive_context_length(account.get("context_length"))
+            or self.config.max_context,
         }
+        provider: dict[str, Any] | None = None
         if group:
-            for key in ("model", "reasoning_effort", "system_prompt", "cost_limit"):
-                value = group.get(key)
-                if value not in (None, ""):
-                    merged[key] = value
             provider_id = group.get("provider_id")
             if provider_id:
                 provider = next(
@@ -379,12 +483,53 @@ class BridgeService:
                 if provider:
                     merged.update(
                         {
-                            "model": provider.get("model") or merged["model"],
+                            "model": model_id(provider.get("model"))
+                            or merged["model"],
                             "base_url": provider.get("base_url") or merged["base_url"],
                             "api_key": provider.get("api_key") or merged["api_key"],
+                            "max_context": positive_context_length(
+                                provider.get("context_length")
+                            )
+                            or merged["max_context"],
                         }
                     )
+            for key in ("model", "reasoning_effort", "cost_limit"):
+                value = group.get(key)
+                if value not in (None, ""):
+                    merged[key] = value
+            if group.get("system_prompt") not in (None, ""):
+                merged["system_prompt"] = str(group["system_prompt"])
+            selected_model = str(merged.get("model") or "")
+            if provider and selected_model:
+                model_record = next(
+                    (
+                        model
+                        for model in provider.get("models", [])
+                        if isinstance(model, dict) and model.get("id") == selected_model
+                    ),
+                    None,
+                )
+                if model_record:
+                    merged["max_context"] = (
+                        positive_context_length(model_record.get("context_length"))
+                        or merged["max_context"]
+                    )
         return merged
+
+    def _account_persona(self, account: dict[str, Any]) -> str:
+        """Render account persona template followed by its supplement."""
+        role_name = account.get("persona_role") or self.state.data.get("active_role")
+        template = ""
+        if role_name:
+            try:
+                template = self.roles.render(str(role_name))
+            except (OSError, ValueError):
+                template = ""
+        if not template:
+            legacy = self.state.data.get("role")
+            template = str(legacy).strip() if legacy else ""
+        supplement = str(account.get("persona_prompt") or "").strip()
+        return "\n\n".join(part for part in (template, supplement) if part)
 
     def resolve_chat(
         self, platform: str, bot_id: str, kind: str, peer_id: str
@@ -432,6 +577,56 @@ class BridgeService:
         tools.extend(project_memory_tools(self.memories))
         tools.extend(self._mcp_tools())
         return tools
+
+    def inherited_tool_names(self, key: str) -> list[str] | None:
+        """Return group/account tool selection before session overrides."""
+        record = self.state.data["conversations"].get(key)
+        if record is None:
+            raise KeyError(key)
+        group = self.group_config(
+            str(record.get("platform", "")),
+            str(record.get("bot_id", "")),
+            str(record.get("peer_id", "")),
+        )
+        if group and isinstance(group.get("enabled_tools"), list):
+            return [str(name) for name in group["enabled_tools"]]
+        account = self.account_config(
+            str(record.get("platform", "")), str(record.get("bot_id", ""))
+        )
+        if account and isinstance(account.get("enabled_tools"), list):
+            return [str(name) for name in account["enabled_tools"]]
+        return None
+
+    def tool_catalog(self) -> list[dict[str, Any]]:
+        """Return tools that the bridge can expose in the current mode."""
+        tools = self.chat_tools("")
+        mcp_search_available = any(
+            item.get("name") == "search" for item in self.mcp_tools
+        )
+        if self.state.data["mode"] == "chat" and not mcp_search_available:
+            tools.extend(tool for tool in builtin_tools() if tool.name == "WebSearch")
+        if self.state.data["mode"] == "agent":
+            tools.extend(builtin_tools())
+        tools.extend(project_memory_tools(self.memories))
+        tools.extend(self._mcp_tools())
+        result: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for tool in tools:
+            if tool.name in seen:
+                continue
+            seen.add(tool.name)
+            admin_only = tool.name in {item.name for item in builtin_tools()}
+            result.append(
+                {
+                    "name": tool.name,
+                    "description": tool.description,
+                    "category": tool.category,
+                    "available": True,
+                    "admin_only": admin_only,
+                    "source": "mcp" if tool.name.startswith("mcp__") else "builtin",
+                }
+            )
+        return result
 
     def _mcp_tools(self) -> list[Tool]:
         from agent.tool import Tool
@@ -538,10 +733,15 @@ class BridgeService:
             )
         names = [tool.name for tool in tools]
         configured = record.get("enabled_tools")
+        inherited = self.inherited_tool_names(key)
         enabled = (
             [name for name in names if name in configured]
             if isinstance(configured, list)
-            else [name for name in names if name in active_names]
+            else (
+                [name for name in names if name in inherited]
+                if inherited is not None
+                else [name for name in names if name in active_names]
+            )
         )
         enabled = [name for name in enabled if name in active_names]
         return {
@@ -587,12 +787,18 @@ class BridgeService:
         )
         available_tools = self.available_session_tools(key)
         configured = self.state.data["conversations"][key].get("enabled_tools")
+        inherited = self.inherited_tool_names(key)
         enabled_names = (
             {name for name in configured if isinstance(name, str)}
             if isinstance(configured, list)
-            else {tool.name for tool in available_tools}
+            else (
+                set(inherited)
+                if inherited is not None
+                else {tool.name for tool in available_tools}
+            )
         )
         tools = [tool for tool in available_tools if tool.name in enabled_names]
+        builtin_names = {tool.name for tool in builtin_tools()}
         permissions = [
             PermissionRule(tool=tool.name, behavior="allow")
             for tool in tools
@@ -600,6 +806,7 @@ class BridgeService:
                 tool.name.startswith("chat_")
                 or tool.name == "WebSearch"
                 or tool.name.startswith("mcp__open_websearch__")
+                or (owner and tool.name in builtin_names)
             )
         ]
         if any(tool.name == "ProjectMemoryRead" for tool in tools):
@@ -642,17 +849,8 @@ class BridgeService:
             "不要附加任何文字。[SILENT] 是内部静默标记，不得发送给群友。"
             "私聊或明确点名时不要使用 [SILENT]。"
         )
-        role = self.state.data.get("role")
-        active_role = self.state.data.get("active_role")
-        if active_role:
-            try:
-                role = self.roles.render(str(active_role))
-            except (OSError, ValueError):
-                role = ""
-        if role:
-            system += f"\n\n当前角色卡（由管理员设置）：\n{role}"
         if runtime_config.get("system_prompt"):
-            system += f"\n\n当前账号/群聊提示词：\n{runtime_config['system_prompt']}"
+            system += f"\n\n当前账号/群聊人格提示：\n{runtime_config['system_prompt']}"
         slang = [
             f"{item['term']}：{item['meaning']}"
             for item in self.state.data["slang"]
@@ -672,7 +870,9 @@ class BridgeService:
             permissions=permissions,
             ask_callback=ask_callback,
             store=self.store,
-            max_context=self.config.max_context,
+            max_context=int(
+                runtime_config.get("max_context") or self.config.max_context
+            ),
             compact_rate=self.config.compact_rate,
             reasoning_effort=str(runtime_config.get("reasoning_effort") or "") or None,
             project_memory_tools_enabled=False,

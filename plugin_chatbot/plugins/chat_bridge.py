@@ -20,7 +20,11 @@ from nonebot_plugin_alconna import Image, Target, UniMessage, get_target, image_
 from pydantic import BaseModel
 
 from plugin_chatbot.bridge import BridgeConfig, BridgeService
-from plugin_chatbot.bridge.service import IncomingMessage
+from plugin_chatbot.bridge.service import (
+    IncomingMessage,
+    normalize_model_records,
+    positive_context_length,
+)
 
 if TYPE_CHECKING:
     from plugin_chatbot.bridge.service import Mode
@@ -199,7 +203,20 @@ async def _message_content(
 def _name_value(value: Any) -> str:
     if isinstance(value, str):
         return value.strip()
-    keys = ("name", "title", "group_name", "guild_name", "channel_name")
+    keys = (
+        "name",
+        "title",
+        "nickname",
+        "user_name",
+        "display_name",
+        "username",
+        "card",
+        "member_name",
+        "bot_name",
+        "group_name",
+        "guild_name",
+        "channel_name",
+    )
     if isinstance(value, dict):
         for key in keys:
             nested = value.get(key)
@@ -222,7 +239,14 @@ def _group_name(event: Event, target: Target) -> str:
         if name:
             return name
     keys = ("group_name", "guild_name", "channel_name", "group", "guild", "channel")
-    for source in (event, target.extra):
+    for source in (
+        event,
+        getattr(event, "sender", None),
+        getattr(event, "group", None),
+        getattr(event, "guild", None),
+        getattr(event, "channel", None),
+        target.extra,
+    ):
         for key in keys:
             value = (
                 source.get(key)
@@ -239,6 +263,7 @@ def _bot_name(bot: Bot) -> str:
     """Best-effort display name across NoneBot adapters."""
     candidates: list[Any] = [
         getattr(bot, "nickname", None),
+        getattr(bot, "display_name", None),
         getattr(bot, "name", None),
         getattr(bot, "user_name", None),
         getattr(bot, "user", None),
@@ -251,8 +276,63 @@ def _bot_name(bot: Bot) -> str:
     return str(getattr(bot, "self_id", ""))
 
 
+def _user_name(event: Event, user_id: str) -> str:
+    getter = getattr(event, "get_user_name", None)
+    if callable(getter):
+        try:
+            name = _name_value(getter())
+        except (AttributeError, NotImplementedError, TypeError, ValueError):
+            name = ""
+        if name:
+            return name
+    for source in (
+        getattr(event, "sender", None),
+        getattr(event, "user", None),
+        getattr(event, "member", None),
+        getattr(event, "author", None),
+        event,
+    ):
+        name = _name_value(source)
+        if name:
+            return name
+    return user_id
+
+
+async def _resolve_bot_name(bot: Bot) -> str:
+    name = _bot_name(bot)
+    if name and name != str(getattr(bot, "self_id", "")):
+        return name
+    getter = getattr(bot, "get_login_info", None)
+    if callable(getter):
+        try:
+            result = getter()
+            if hasattr(result, "__await__"):
+                result = await cast("Any", result)
+            name = _name_value(result)
+        except (AttributeError, NotImplementedError, TypeError, ValueError):
+            name = ""
+    return name or str(getattr(bot, "self_id", ""))
+
+
+async def _resolve_group_name(bot: Bot, group_id: str, current: str) -> str:
+    if current:
+        return current
+    getter = getattr(bot, "get_group_info", None)
+    if callable(getter):
+        try:
+            result = getter(group_id=group_id)
+            if hasattr(result, "__await__"):
+                result = await cast("Any", result)
+            name = _name_value(result)
+            if name:
+                return name
+        except (AttributeError, NotImplementedError, TypeError, ValueError):
+            pass
+    return group_id
+
+
 @_message.handle()
-async def _handle_message(bot: Bot, event: Event) -> None:
+async def _handle_message(bot: Bot, event: Event) -> None:  # noqa: C901
     user_id = str(event.get_user_id())
     if user_id == str(getattr(bot, "self_id", "")):
         return
@@ -262,8 +342,7 @@ async def _handle_message(bot: Bot, event: Event) -> None:
         return
     kind = "private" if target.private else "group"
     peer_id = target.id if kind == "private" else (target.parent_id or target.id)
-    name_method = getattr(event, "get_user_name", None)
-    user_name = _name_value(name_method() if callable(name_method) else "") or user_id
+    user_name = _user_name(event, user_id)
     event_id_method = getattr(event, "get_message_id", None)
     event_id = str(event_id_method() if callable(event_id_method) else "")
     message = event.get_message()
@@ -306,6 +385,7 @@ async def _handle_message(bot: Bot, event: Event) -> None:
         group_name=_group_name(event, target) if kind == "group" else "",
     )
     account = _service.account_config(incoming.platform, incoming.bot_id)
+    bot_name = await _resolve_bot_name(bot)
     if account is None:
         _service.state.data["accounts"].append(
             {
@@ -313,22 +393,31 @@ async def _handle_message(bot: Bot, event: Event) -> None:
                 "platform": incoming.platform,
                 "adapter": incoming.platform,
                 "bot_id": incoming.bot_id,
-                "name": _bot_name(bot),
+                "name": bot_name,
+                "name_source": "adapter" if bot_name != incoming.bot_id else "fallback",
                 "enabled": True,
-                "plugin": incoming.platform,
-                "plugin_config": {},
                 "model": "",
                 "base_url": "",
                 "api_key": "",
                 "reasoning_effort": "",
+                "context_length": None,
+                "persona_role": None,
                 "persona_prompt": "",
+                "enabled_tools": None,
                 "groups": [],
             }
         )
         _service.state.save()
-    elif not account.get("name") or account.get("name") == incoming.bot_id:
-        account["name"] = _bot_name(bot)
+    elif account.get("name_source") != "manual" and (
+        not account.get("name") or account.get("name_source") == "fallback"
+    ):
+        account["name"] = bot_name
+        account["name_source"] = (
+            "adapter" if bot_name != incoming.bot_id else "fallback"
+        )
         _service.state.save()
+    if kind == "group" and not incoming.group_name:
+        incoming.group_name = await _resolve_group_name(bot, incoming.peer_id, "")
     if (
         kind == "group"
         and _service.group_config(incoming.platform, incoming.bot_id, incoming.peer_id)
@@ -341,6 +430,9 @@ async def _handle_message(bot: Bot, event: Event) -> None:
                 "bot_id": incoming.bot_id,
                 "group_id": incoming.peer_id,
                 "name": incoming.group_name or incoming.peer_id,
+                "name_source": (
+                    "adapter" if incoming.group_name != incoming.peer_id else "fallback"
+                ),
                 "enabled": True,
                 "provider_id": "",
                 "system_prompt": "",
@@ -348,10 +440,19 @@ async def _handle_message(bot: Bot, event: Event) -> None:
                 "reasoning_effort": "",
                 "model": "",
                 "cost_limit": None,
+                "enabled_tools": None,
                 "tools": {"skills": [], "mcps": [], "rules": []},
             }
         )
         _service.state.save()
+    elif kind == "group":
+        group = _service.group_config(
+            incoming.platform, incoming.bot_id, incoming.peer_id
+        )
+        if group and group.get("name_source") != "manual" and incoming.group_name:
+            group["name"] = incoming.group_name
+            group["name_source"] = "adapter"
+            _service.state.save()
     response = await _service.handle_message(incoming)
     if response and not await _service.send_reply(incoming, response):
         logger.warning("Chat bridge suppressed reply due to outbound rate limit")
@@ -409,16 +510,18 @@ async def _create_account(body: dict[str, Any]) -> dict[str, Any]:
         "adapter": str(body.get("adapter") or platform),
         "bot_id": bot_id,
         "name": str(body.get("name") or bot_id)[:120],
+        "name_source": "manual" if body.get("name") else "fallback",
         "enabled": bool(body.get("enabled", True)),
-        "plugin": str(body.get("plugin") or platform),
-        "plugin_config": body.get("plugin_config")
-        if isinstance(body.get("plugin_config"), dict)
-        else {},
         "model": str(body.get("model") or ""),
         "base_url": str(body.get("base_url") or ""),
         "api_key": str(body.get("api_key") or ""),
         "reasoning_effort": str(body.get("reasoning_effort") or ""),
+        "context_length": positive_context_length(body.get("context_length")),
+        "persona_role": str(body.get("persona_role") or "") or None,
         "persona_prompt": str(body.get("persona_prompt") or ""),
+        "enabled_tools": body.get("enabled_tools")
+        if isinstance(body.get("enabled_tools"), list)
+        else None,
         "groups": [],
     }
     _service.state.data["accounts"].append(row)
@@ -437,17 +540,20 @@ async def _update_account(row_id: str, body: dict[str, Any]) -> dict[str, Any]:
         "platform",
         "adapter",
         "bot_id",
-        "plugin",
         "model",
         "base_url",
         "api_key",
         "reasoning_effort",
+        "context_length",
+        "persona_role",
         "persona_prompt",
         "enabled",
-        "plugin_config",
+        "enabled_tools",
     ):
         if key in body:
             row[key] = body[key]
+    if "name" in body:
+        row["name_source"] = "manual" if str(body["name"]).strip() else "fallback"
     _service.state.save()
     _service.agents.clear()
     return row
@@ -495,6 +601,7 @@ async def _create_group(body: dict[str, Any]) -> dict[str, Any]:
         "bot_id": bot_id,
         "group_id": group_id,
         "name": str(body.get("name") or group_id)[:160],
+        "name_source": "manual" if body.get("name") else "fallback",
         "enabled": bool(body.get("enabled", True)),
         "provider_id": str(body.get("provider_id") or ""),
         "system_prompt": str(body.get("system_prompt") or ""),
@@ -505,6 +612,9 @@ async def _create_group(body: dict[str, Any]) -> dict[str, Any]:
         "tools": body.get("tools")
         if isinstance(body.get("tools"), dict)
         else {"skills": [], "mcps": [], "rules": []},
+        "enabled_tools": body.get("enabled_tools")
+        if isinstance(body.get("enabled_tools"), list)
+        else None,
     }
     _service.state.data["groups"].append(row)
     _service.state.save()
@@ -530,9 +640,12 @@ async def _update_group(row_id: str, body: dict[str, Any]) -> dict[str, Any]:
         "model",
         "cost_limit",
         "tools",
+        "enabled_tools",
     ):
         if key in body:
             row[key] = body[key]
+    if "name" in body:
+        row["name_source"] = "manual" if str(body["name"]).strip() else "fallback"
     _service.state.save()
     _service.agents.clear()
     return row
@@ -560,6 +673,9 @@ async def _create_interface(kind: str, body: dict[str, Any]) -> dict[str, Any]:
     if kind not in {"providers", "skills", "mcps", "rules"}:
         raise HTTPException(status_code=404, detail="Unknown interface kind")
     row = {"id": _new_id(), **body}
+    if kind == "providers":
+        row["models"] = normalize_model_records(row.get("models", []))
+        row["context_length"] = positive_context_length(row.get("context_length"))
     _service.state.data["interfaces"][kind].append(row)
     _service.state.save()
     _service.agents.clear()
@@ -576,6 +692,9 @@ async def _update_interface(
     if row is None:
         raise HTTPException(status_code=404, detail="Interface not found")
     row.update(body)
+    if kind == "providers":
+        row["models"] = normalize_model_records(row.get("models", []))
+        row["context_length"] = positive_context_length(row.get("context_length"))
     _service.state.save()
     _service.agents.clear()
     return row
@@ -594,6 +713,38 @@ async def _delete_interface(kind: str, row_id: str) -> dict[str, bool]:
     return {"deleted": len(_service.state.data["interfaces"][kind]) < before}
 
 
+async def _fetch_provider_models(base_url: str, api_key: str) -> list[dict[str, Any]]:
+    try:
+        from openai import AsyncOpenAI
+
+        client = AsyncOpenAI(
+            base_url=base_url.strip() or None,
+            api_key=api_key.strip() or "EMPTY",
+        )
+        try:
+            response = await client.models.list()
+            raw_models = list(response.data)
+        finally:
+            await client.close()
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Model discovery failed: {type(exc).__name__}",
+        ) from exc
+    return normalize_model_records(raw_models)
+
+
+@_api.post(
+    "/api/interfaces/providers/discover",
+    dependencies=[Depends(_authorize)],
+)
+async def _discover_provider_models_preview(body: dict[str, Any]) -> dict[str, Any]:
+    models = await _fetch_provider_models(
+        str(body.get("base_url") or ""), str(body.get("api_key") or "")
+    )
+    return {"models": models}
+
+
 @_api.post(
     "/api/interfaces/providers/{row_id}/models",
     dependencies=[Depends(_authorize)],
@@ -602,24 +753,17 @@ async def _discover_provider_models(row_id: str) -> dict[str, Any]:
     provider = _find_row(_service.state.data["interfaces"]["providers"], row_id)
     if provider is None:
         raise HTTPException(status_code=404, detail="Provider not found")
-    try:
-        from openai import AsyncOpenAI
-
-        client = AsyncOpenAI(
-            base_url=str(provider.get("base_url") or "") or None,
-            api_key=str(provider.get("api_key") or "EMPTY"),
-        )
-        response = await client.models.list()
-        models = [str(item.id) for item in response.data]
-        await client.close()
-    except Exception as exc:
-        raise HTTPException(
-            status_code=502,
-            detail=f"Model discovery failed: {type(exc).__name__}",
-        ) from exc
+    models = await _fetch_provider_models(
+        str(provider.get("base_url") or ""), str(provider.get("api_key") or "")
+    )
     provider["models"] = models
     _service.state.save()
     return {"models": models}
+
+
+@_api.get("/api/tools", dependencies=[Depends(_authorize)])
+async def _tools() -> list[dict[str, Any]]:
+    return _service.tool_catalog()
 
 
 @_api.get("/api/status", dependencies=[Depends(_authorize)])
