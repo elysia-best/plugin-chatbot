@@ -112,6 +112,39 @@ class BridgeServiceTests(unittest.TestCase):
         self.assertEqual(first, second)
         self.assertEqual(chat_id, restored_chat)
 
+    def test_account_and_group_config_are_scoped_by_adapter_and_bot(self) -> None:
+        self.service.state.data["accounts"] = [
+            {
+                "id": "a1",
+                "platform": "onebot",
+                "bot_id": "100",
+                "name": "主 Bot",
+                "model": "model-a",
+                "enabled": True,
+            },
+            {
+                "id": "a2",
+                "platform": "onebot",
+                "bot_id": "200",
+                "name": "备用 Bot",
+                "model": "model-b",
+                "enabled": True,
+            },
+        ]
+        self.service.state.data["groups"] = [
+            {
+                "id": "g1",
+                "platform": "onebot",
+                "bot_id": "100",
+                "group_id": "room",
+                "model": "group-model",
+                "enabled": True,
+            }
+        ]
+        self.assertEqual("model-a", self.service.effective_chat_config("onebot", "100", "private", "u")["model"])
+        self.assertEqual("group-model", self.service.effective_chat_config("onebot", "100", "group", "room")["model"])
+        self.assertEqual("model-b", self.service.effective_chat_config("onebot", "200", "group", "room")["model"])
+
     def test_slang_settings_survive_restart_and_are_bounded(self) -> None:
         self.service.config.slang_enabled = False
         self.service.config.slang_min_messages = 12

@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 from nonebot import get_driver, get_plugin_config, logger, on_message
 from nonebot.adapters import Bot, Event  # noqa: TC002
 from nonebot_plugin_alconna import Image, Target, UniMessage, get_target, image_fetch
@@ -106,8 +107,7 @@ _service = BridgeService(
         mode=cast(
             "Mode",
             _settings.bridge_mode
-            if _settings.bridge_mode
-            in {"chat", "agent"}
+            if _settings.bridge_mode in {"chat", "agent"}
             else "chat",
         ),
         max_message_chars=max(100, min(_settings.bridge_max_message_chars, 4000)),
@@ -235,6 +235,22 @@ def _group_name(event: Event, target: Target) -> str:
     return ""
 
 
+def _bot_name(bot: Bot) -> str:
+    """Best-effort display name across NoneBot adapters."""
+    candidates: list[Any] = [
+        getattr(bot, "nickname", None),
+        getattr(bot, "name", None),
+        getattr(bot, "user_name", None),
+        getattr(bot, "user", None),
+        getattr(bot, "config", None),
+    ]
+    for value in candidates:
+        name = _name_value(value)
+        if name:
+            return name
+    return str(getattr(bot, "self_id", ""))
+
+
 @_message.handle()
 async def _handle_message(bot: Bot, event: Event) -> None:
     user_id = str(event.get_user_id())
@@ -289,6 +305,53 @@ async def _handle_message(bot: Bot, event: Event) -> None:
         content=content,
         group_name=_group_name(event, target) if kind == "group" else "",
     )
+    account = _service.account_config(incoming.platform, incoming.bot_id)
+    if account is None:
+        _service.state.data["accounts"].append(
+            {
+                "id": secrets.token_hex(8),
+                "platform": incoming.platform,
+                "adapter": incoming.platform,
+                "bot_id": incoming.bot_id,
+                "name": _bot_name(bot),
+                "enabled": True,
+                "plugin": incoming.platform,
+                "plugin_config": {},
+                "model": "",
+                "base_url": "",
+                "api_key": "",
+                "reasoning_effort": "",
+                "persona_prompt": "",
+                "groups": [],
+            }
+        )
+        _service.state.save()
+    elif not account.get("name") or account.get("name") == incoming.bot_id:
+        account["name"] = _bot_name(bot)
+        _service.state.save()
+    if (
+        kind == "group"
+        and _service.group_config(incoming.platform, incoming.bot_id, incoming.peer_id)
+        is None
+    ):
+        _service.state.data["groups"].append(
+            {
+                "id": secrets.token_hex(8),
+                "platform": incoming.platform,
+                "bot_id": incoming.bot_id,
+                "group_id": incoming.peer_id,
+                "name": incoming.group_name or incoming.peer_id,
+                "enabled": True,
+                "provider_id": "",
+                "system_prompt": "",
+                "reply_frequency": "balanced",
+                "reasoning_effort": "",
+                "model": "",
+                "cost_limit": None,
+                "tools": {"skills": [], "mcps": [], "rules": []},
+            }
+        )
+        _service.state.save()
     response = await _service.handle_message(incoming)
     if response and not await _service.send_reply(incoming, response):
         logger.warning("Chat bridge suppressed reply due to outbound rate limit")
@@ -319,9 +382,259 @@ _driver = get_driver()
 _api = FastAPI()
 
 
+def _new_id() -> str:
+    return secrets.token_hex(8)
+
+
+def _find_row(rows: list[dict[str, Any]], row_id: str) -> dict[str, Any] | None:
+    return next((row for row in rows if str(row.get("id")) == row_id), None)
+
+
+@_api.get("/api/accounts", dependencies=[Depends(_authorize)])
+async def _accounts() -> list[dict[str, Any]]:
+    return _service.state.data["accounts"]
+
+
+@_api.post("/api/accounts", dependencies=[Depends(_authorize)])
+async def _create_account(body: dict[str, Any]) -> dict[str, Any]:
+    platform = str(body.get("platform") or body.get("adapter") or "").strip()
+    bot_id = str(body.get("bot_id", "")).strip()
+    if not platform or not bot_id:
+        raise HTTPException(status_code=422, detail="platform and bot_id are required")
+    if _service.account_config(platform, bot_id):
+        raise HTTPException(status_code=409, detail="Account already exists")
+    row = {
+        "id": _new_id(),
+        "platform": platform,
+        "adapter": str(body.get("adapter") or platform),
+        "bot_id": bot_id,
+        "name": str(body.get("name") or bot_id)[:120],
+        "enabled": bool(body.get("enabled", True)),
+        "plugin": str(body.get("plugin") or platform),
+        "plugin_config": body.get("plugin_config")
+        if isinstance(body.get("plugin_config"), dict)
+        else {},
+        "model": str(body.get("model") or ""),
+        "base_url": str(body.get("base_url") or ""),
+        "api_key": str(body.get("api_key") or ""),
+        "reasoning_effort": str(body.get("reasoning_effort") or ""),
+        "persona_prompt": str(body.get("persona_prompt") or ""),
+        "groups": [],
+    }
+    _service.state.data["accounts"].append(row)
+    _service.state.save()
+    _service.agents.clear()
+    return row
+
+
+@_api.put("/api/accounts/{row_id}", dependencies=[Depends(_authorize)])
+async def _update_account(row_id: str, body: dict[str, Any]) -> dict[str, Any]:
+    row = _find_row(_service.state.data["accounts"], row_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Account not found")
+    for key in (
+        "name",
+        "platform",
+        "adapter",
+        "bot_id",
+        "plugin",
+        "model",
+        "base_url",
+        "api_key",
+        "reasoning_effort",
+        "persona_prompt",
+        "enabled",
+        "plugin_config",
+    ):
+        if key in body:
+            row[key] = body[key]
+    _service.state.save()
+    _service.agents.clear()
+    return row
+
+
+@_api.delete("/api/accounts/{row_id}", dependencies=[Depends(_authorize)])
+async def _delete_account(row_id: str) -> dict[str, bool]:
+    before = len(_service.state.data["accounts"])
+    account = _find_row(_service.state.data["accounts"], row_id)
+    _service.state.data["accounts"] = [
+        row for row in _service.state.data["accounts"] if str(row.get("id")) != row_id
+    ]
+    if account:
+        _service.state.data["groups"] = [
+            row
+            for row in _service.state.data["groups"]
+            if not (
+                str(row.get("platform")) == str(account.get("platform"))
+                and str(row.get("bot_id")) == str(account.get("bot_id"))
+            )
+        ]
+    _service.state.save()
+    return {"deleted": len(_service.state.data["accounts"]) < before}
+
+
+@_api.get("/api/groups", dependencies=[Depends(_authorize)])
+async def _groups() -> list[dict[str, Any]]:
+    return _service.state.data["groups"]
+
+
+@_api.post("/api/groups", dependencies=[Depends(_authorize)])
+async def _create_group(body: dict[str, Any]) -> dict[str, Any]:
+    platform = str(body.get("platform") or "").strip()
+    bot_id = str(body.get("bot_id") or "").strip()
+    group_id = str(body.get("group_id") or "").strip()
+    if not platform or not bot_id or not group_id:
+        raise HTTPException(
+            status_code=422, detail="platform, bot_id and group_id are required"
+        )
+    if _service.group_config(platform, bot_id, group_id):
+        raise HTTPException(status_code=409, detail="Group already exists")
+    row = {
+        "id": _new_id(),
+        "platform": platform,
+        "bot_id": bot_id,
+        "group_id": group_id,
+        "name": str(body.get("name") or group_id)[:160],
+        "enabled": bool(body.get("enabled", True)),
+        "provider_id": str(body.get("provider_id") or ""),
+        "system_prompt": str(body.get("system_prompt") or ""),
+        "reply_frequency": str(body.get("reply_frequency") or "balanced"),
+        "reasoning_effort": str(body.get("reasoning_effort") or ""),
+        "model": str(body.get("model") or ""),
+        "cost_limit": body.get("cost_limit"),
+        "tools": body.get("tools")
+        if isinstance(body.get("tools"), dict)
+        else {"skills": [], "mcps": [], "rules": []},
+    }
+    _service.state.data["groups"].append(row)
+    _service.state.save()
+    _service.agents.clear()
+    return row
+
+
+@_api.put("/api/groups/{row_id}", dependencies=[Depends(_authorize)])
+async def _update_group(row_id: str, body: dict[str, Any]) -> dict[str, Any]:
+    row = _find_row(_service.state.data["groups"], row_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Group not found")
+    for key in (
+        "platform",
+        "bot_id",
+        "group_id",
+        "name",
+        "enabled",
+        "provider_id",
+        "system_prompt",
+        "reply_frequency",
+        "reasoning_effort",
+        "model",
+        "cost_limit",
+        "tools",
+    ):
+        if key in body:
+            row[key] = body[key]
+    _service.state.save()
+    _service.agents.clear()
+    return row
+
+
+@_api.delete("/api/groups/{row_id}", dependencies=[Depends(_authorize)])
+async def _delete_group(row_id: str) -> dict[str, bool]:
+    before = len(_service.state.data["groups"])
+    _service.state.data["groups"] = [
+        row for row in _service.state.data["groups"] if str(row.get("id")) != row_id
+    ]
+    _service.state.save()
+    return {"deleted": len(_service.state.data["groups"]) < before}
+
+
+@_api.get("/api/interfaces/{kind}", dependencies=[Depends(_authorize)])
+async def _interfaces(kind: str) -> list[dict[str, Any]]:
+    if kind not in {"providers", "skills", "mcps", "rules"}:
+        raise HTTPException(status_code=404, detail="Unknown interface kind")
+    return _service.state.data["interfaces"][kind]
+
+
+@_api.post("/api/interfaces/{kind}", dependencies=[Depends(_authorize)])
+async def _create_interface(kind: str, body: dict[str, Any]) -> dict[str, Any]:
+    if kind not in {"providers", "skills", "mcps", "rules"}:
+        raise HTTPException(status_code=404, detail="Unknown interface kind")
+    row = {"id": _new_id(), **body}
+    _service.state.data["interfaces"][kind].append(row)
+    _service.state.save()
+    _service.agents.clear()
+    return row
+
+
+@_api.put("/api/interfaces/{kind}/{row_id}", dependencies=[Depends(_authorize)])
+async def _update_interface(
+    kind: str, row_id: str, body: dict[str, Any]
+) -> dict[str, Any]:
+    if kind not in {"providers", "skills", "mcps", "rules"}:
+        raise HTTPException(status_code=404, detail="Unknown interface kind")
+    row = _find_row(_service.state.data["interfaces"][kind], row_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Interface not found")
+    row.update(body)
+    _service.state.save()
+    _service.agents.clear()
+    return row
+
+
+@_api.delete("/api/interfaces/{kind}/{row_id}", dependencies=[Depends(_authorize)])
+async def _delete_interface(kind: str, row_id: str) -> dict[str, bool]:
+    if kind not in {"providers", "skills", "mcps", "rules"}:
+        raise HTTPException(status_code=404, detail="Unknown interface kind")
+    rows = _service.state.data["interfaces"][kind]
+    before = len(rows)
+    _service.state.data["interfaces"][kind] = [
+        row for row in rows if str(row.get("id")) != row_id
+    ]
+    _service.state.save()
+    return {"deleted": len(_service.state.data["interfaces"][kind]) < before}
+
+
+@_api.post(
+    "/api/interfaces/providers/{row_id}/models",
+    dependencies=[Depends(_authorize)],
+)
+async def _discover_provider_models(row_id: str) -> dict[str, Any]:
+    provider = _find_row(_service.state.data["interfaces"]["providers"], row_id)
+    if provider is None:
+        raise HTTPException(status_code=404, detail="Provider not found")
+    try:
+        from openai import AsyncOpenAI
+
+        client = AsyncOpenAI(
+            base_url=str(provider.get("base_url") or "") or None,
+            api_key=str(provider.get("api_key") or "EMPTY"),
+        )
+        response = await client.models.list()
+        models = [str(item.id) for item in response.data]
+        await client.close()
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Model discovery failed: {type(exc).__name__}",
+        ) from exc
+    provider["models"] = models
+    _service.state.save()
+    return {"models": models}
+
+
 @_api.get("/api/status", dependencies=[Depends(_authorize)])
 async def _status() -> dict[str, Any]:
     return _service.snapshot()
+
+
+@_api.get("/api/logs", dependencies=[Depends(_authorize)])
+async def _logs(limit: int = 200) -> dict[str, Any]:
+    bounded = max(1, min(limit, 1000))
+    return {
+        "activity": _service.state.data["activity"][-bounded:],
+        "conversations": list(_service.state.data["conversations"].values()),
+        "usage": _service.state.data["usage"][-bounded:],
+    }
 
 
 @_api.post("/api/approvals/{conversation_key}", dependencies=[Depends(_authorize)])
@@ -754,12 +1067,28 @@ async def _update_slang_settings(body: SlangSettingsRequest) -> dict[str, Any]:
     return await _slang_settings()
 
 
+_webui_static = Path(__file__).with_name("webui")
+if (_webui_static / "assets").is_dir():
+    _api.mount(
+        "/assets",
+        StaticFiles(directory=_webui_static / "assets"),
+        name="chatbot-webui-assets",
+    )
+
+
 @_api.get("/", include_in_schema=False)
 async def _console() -> FileResponse:
-    return FileResponse(Path(__file__).with_name("console.html"))
+    built_index = _webui_static / "index.html"
+    if not built_index.is_file():
+        raise HTTPException(
+            status_code=503,
+            detail="WebUI static files are unavailable; run `npm run build` in webui/.",
+        )
+    return FileResponse(built_index)
 
 
 cast("Any", _driver).server_app.mount("/chat-agent", _api)
+
 
 @_driver.on_startup
 async def _initialize_bridge() -> None:

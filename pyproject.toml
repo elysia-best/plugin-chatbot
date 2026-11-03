@@ -30,7 +30,10 @@ builtin_plugins = []
 nonebot-plugin-alconna = ["nonebot_plugin_alconna"]
 
 [tool.setuptools.package-data]
-plugin_chatbot = ["plugins/*.html"]
+plugin_chatbot = [
+    "plugins/webui/index.html",
+    "plugins/webui/assets/*",
+]
 
 [tool.setuptools.packages.find]
 where = ["."]

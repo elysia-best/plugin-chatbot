@@ -54,6 +54,31 @@ Without configured owner IDs or allowlists, only configured owners can use the b
 Bridge persistence is separate from the Agent's normal coding sessions. Message transport always goes through Alconna abstractions; features such as native reply references depend on the adapter's exported segment support.
 
 Default web admin panel is on http://127.0.0.1:8080/chat-agent/
+
+The redesigned management UI lives in the standalone `webui/` project. Its
+source code and Node dependencies are development-only; the Python package
+contains only the generated static files under `plugin_chatbot/plugins/webui/`.
+Build it before running the console:
+
+```powershell
+cd webui
+npm install
+npm run build
+```
+
+`npm run build` copies the Vite output from `webui/dist/` into
+`plugin_chatbot/plugins/webui/`. The plugin serves that packaged directory at
+`/chat-agent/`.
+
+## Multi-adapter configuration
+
+The management panel now keeps configuration in three layers:
+
+- **Account**: `adapter/platform + bot_id` identifies one connected Bot. Each Bot can have its own plugin parameters, OpenAI-compatible endpoint, model, API key, reasoning effort, and enabled state.
+- **Group**: `adapter/platform + bot_id + group_id` identifies one group attached to one Bot. Group settings can override provider, model, prompt, reply frequency, reasoning effort, cost limit, and selected Skill/MCP/Rules.
+- **Interfaces**: providers, skills, MCP servers, and rules are shared catalogs. Provider records expose a model-discovery action through the console.
+
+Account and group records are stored in `bridge-state.json` under `BRIDGE_STATE_DIR`. Existing environment variables remain as fallback defaults, so an installation can be upgraded without rewriting its NoneBot configuration.
 ## Development checks
 
 ```powershell

@@ -146,3 +146,5 @@ dmypy.json
 
 # vscode
 .vscode/
+webui/node_modules/
+webui/dist/

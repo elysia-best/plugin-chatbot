@@ -113,6 +113,14 @@ class BridgeState:
             "slang_settings": {},
             "voice_sends": [],
             "outbound_sends": {},
+            "accounts": [],
+            "groups": [],
+            "interfaces": {
+                "providers": [],
+                "skills": [],
+                "mcps": [],
+                "rules": [],
+            },
         }
         try:
             loaded = json.loads(self.path.read_text(encoding="utf-8"))
@@ -131,9 +139,18 @@ class BridgeState:
             ("initial_prompts", {}),
             ("voice_sends", []),
             ("outbound_sends", {}),
+            ("accounts", []),
+            ("groups", []),
         ):
             if not isinstance(self.data.get(key), type(value)):
                 self.data[key] = value
+        interfaces = self.data.get("interfaces")
+        if not isinstance(interfaces, dict):
+            interfaces = {}
+            self.data["interfaces"] = interfaces
+        for key in ("providers", "skills", "mcps", "rules"):
+            if not isinstance(interfaces.get(key), list):
+                interfaces[key] = []
         saved_mode = self.data.get("mode")
         self.data["mode"] = (
             "agent" if saved_mode in {"agent", "closed-agent"} else "chat"
@@ -304,6 +321,71 @@ class BridgeService:
         )
         return peer_id in allowlist
 
+    def account_config(self, platform: str, bot_id: str) -> dict[str, Any] | None:
+        """Return the persisted account record for an adapter bot."""
+        for account in self.state.data.get("accounts", []):
+            if (
+                str(account.get("platform", "")).casefold() == platform.casefold()
+                and str(account.get("bot_id", "")) == bot_id
+            ):
+                return account
+        return None
+
+    def group_config(
+        self, platform: str, bot_id: str, peer_id: str
+    ) -> dict[str, Any] | None:
+        """Return the persisted group record for an adapter bot and group."""
+        for group in self.state.data.get("groups", []):
+            if (
+                str(group.get("platform", "")).casefold() == platform.casefold()
+                and str(group.get("bot_id", "")) == bot_id
+                and str(group.get("group_id", "")) == peer_id
+            ):
+                return group
+        return None
+
+    def effective_chat_config(
+        self, platform: str, bot_id: str, kind: str, peer_id: str
+    ) -> dict[str, Any]:
+        """Merge account defaults and group overrides for one conversation."""
+        account = self.account_config(platform, bot_id) or {}
+        group = (
+            self.group_config(platform, bot_id, peer_id) if kind == "group" else None
+        )
+        merged: dict[str, Any] = {
+            "model": account.get("model") or self.config.model,
+            "base_url": account.get("base_url") or self.config.base_url,
+            "api_key": account.get("api_key") or self.config.api_key,
+            "reasoning_effort": account.get("reasoning_effort")
+            or self.config.reasoning_effort,
+            "system_prompt": account.get("persona_prompt") or "",
+            "cost_limit": account.get("cost_limit"),
+        }
+        if group:
+            for key in ("model", "reasoning_effort", "system_prompt", "cost_limit"):
+                value = group.get(key)
+                if value not in (None, ""):
+                    merged[key] = value
+            provider_id = group.get("provider_id")
+            if provider_id:
+                provider = next(
+                    (
+                        row
+                        for row in self.state.data["interfaces"]["providers"]
+                        if row.get("id") == provider_id
+                    ),
+                    None,
+                )
+                if provider:
+                    merged.update(
+                        {
+                            "model": provider.get("model") or merged["model"],
+                            "base_url": provider.get("base_url") or merged["base_url"],
+                            "api_key": provider.get("api_key") or merged["api_key"],
+                        }
+                    )
+        return merged
+
     def resolve_chat(
         self, platform: str, bot_id: str, kind: str, peer_id: str
     ) -> tuple[str, str]:
@@ -345,10 +427,7 @@ class BridgeService:
                 for tool in builtin_tools()
                 if not (mcp_search_available and tool.name == "WebSearch")
             )
-        elif (
-            self.state.data["mode"] == "chat"
-            and not mcp_search_available
-        ):
+        elif self.state.data["mode"] == "chat" and not mcp_search_available:
             tools.extend(tool for tool in builtin_tools() if tool.name == "WebSearch")
         tools.extend(project_memory_tools(self.memories))
         tools.extend(self._mcp_tools())
@@ -459,9 +538,11 @@ class BridgeService:
             )
         names = [tool.name for tool in tools]
         configured = record.get("enabled_tools")
-        enabled = [name for name in names if name in configured] if isinstance(
-            configured, list
-        ) else [name for name in names if name in active_names]
+        enabled = (
+            [name for name in names if name in configured]
+            if isinstance(configured, list)
+            else [name for name in names if name in active_names]
+        )
         enabled = [name for name in enabled if name in active_names]
         return {
             "mode": self.state.data["mode"],
@@ -482,7 +563,9 @@ class BridgeService:
         selected = set(enabled)
         unknown = selected - available
         if unknown:
-            raise ValueError(f"Unavailable tools: {', '.join(sorted(unknown))}")
+            raise ValueError(  # noqa: TRY003
+                f"Unavailable tools: {', '.join(sorted(unknown))}"
+            )
         self.state.data["conversations"][key]["enabled_tools"] = sorted(selected)
         self.state.save()
 
@@ -495,6 +578,13 @@ class BridgeService:
 
     def _agent(self, key: str, chat_id: str, *, owner: bool) -> Agent:
         agent = self.agents.get(key)
+        record = self.state.data["conversations"][key]
+        runtime_config = self.effective_chat_config(
+            str(record.get("platform", "")),
+            str(record.get("bot_id", "")),
+            str(record.get("kind", "group")),
+            str(record.get("peer_id", "")),
+        )
         available_tools = self.available_session_tools(key)
         configured = self.state.data["conversations"][key].get("enabled_tools")
         enabled_names = (
@@ -561,6 +651,8 @@ class BridgeService:
                 role = ""
         if role:
             system += f"\n\n当前角色卡（由管理员设置）：\n{role}"
+        if runtime_config.get("system_prompt"):
+            system += f"\n\n当前账号/群聊提示词：\n{runtime_config['system_prompt']}"
         slang = [
             f"{item['term']}：{item['meaning']}"
             for item in self.state.data["slang"]
@@ -571,9 +663,9 @@ class BridgeService:
         if slang:
             system += "\n\n【已确认的群聊用语】\n" + "\n".join(slang[:50])
         agent = Agent(
-            model=self.config.model or None,
-            base_url=self.config.base_url or None,
-            api_key=self.config.api_key or None,
+            model=str(runtime_config.get("model") or "") or None,
+            base_url=str(runtime_config.get("base_url") or "") or None,
+            api_key=str(runtime_config.get("api_key") or "") or None,
             system_prompt=system,
             workspace=str(self.config.workspace),
             tools=tools,
@@ -582,7 +674,7 @@ class BridgeService:
             store=self.store,
             max_context=self.config.max_context,
             compact_rate=self.config.compact_rate,
-            reasoning_effort=self.config.reasoning_effort or None,
+            reasoning_effort=str(runtime_config.get("reasoning_effort") or "") or None,
             project_memory_tools_enabled=False,
         )
         agent.load_chat(chat_id)
@@ -908,9 +1000,7 @@ class BridgeService:
         )
         return await self.send_text(key, text, reply_to=incoming.reply_to or None)
 
-    async def send_text(
-        self, key: str, text: str, reply_to: Any = None
-    ) -> bool:
+    async def send_text(self, key: str, text: str, reply_to: Any = None) -> bool:
         target = self.targets[key]
         bot = self.bots[key]
         parts = split_message(text, self.config.max_message_chars)
@@ -1062,7 +1152,7 @@ class BridgeService:
             )
         return await future
 
-    async def _flush_group_batch(self, key: str) -> None:
+    async def _flush_group_batch(self, key: str) -> None:  # noqa: C901
         await asyncio.sleep(max(0.0, min(self.config.group_batch_seconds, 10.0)))
         queued = self.group_batches.pop(key, [])
         if not queued:
@@ -1097,9 +1187,7 @@ class BridgeService:
             peer_id=first.peer_id,
             user_id=first.user_id,
             user_name=f"{len(messages)} 位群成员",
-            text="\n".join(
-                f"{sender_context(item)}{item.text}" for item in messages
-            ),
+            text="\n".join(f"{sender_context(item)}{item.text}" for item in messages),
             target=messages[-1].target,
             event_id=first.event_id,
             content=chunks,
@@ -1119,6 +1207,16 @@ class BridgeService:
     async def _process_message(  # noqa: C901, PLR0911, PLR0912, PLR0915
         self, incoming: IncomingMessage
     ) -> str:
+        account = self.account_config(incoming.platform, incoming.bot_id)
+        if account is not None and not bool(account.get("enabled", True)):
+            return ""
+        group = self.group_config(incoming.platform, incoming.bot_id, incoming.peer_id)
+        if (
+            incoming.kind == "group"
+            and group is not None
+            and not bool(group.get("enabled", True))
+        ):
+            return ""
         private_peer = incoming.peer_id if incoming.kind == "private" else None
         owner = self.is_admin(incoming.user_id, private_peer)
         if not self.is_allowed(incoming.kind, incoming.peer_id, incoming.user_id):
@@ -1165,9 +1263,7 @@ class BridgeService:
             if command_result is not None:
                 return command_result
         mode = self.state.data["mode"]
-        if mode == "agent" and not (
-            owner and incoming.kind == "private"
-        ):
+        if mode == "agent" and not (owner and incoming.kind == "private"):
             return ""
         if (
             incoming.kind == "group"
@@ -1257,7 +1353,7 @@ class BridgeService:
         del self.state.data["usage"][:-20000]
         self.state.save()
 
-    def command(
+    def command(  # noqa: C901, PLR0911, PLR0912
         self,
         user_id: str,
         text: str,
@@ -1338,4 +1434,7 @@ class BridgeService:
                 {"conversation": key, "question": question}
                 for key, question in self.approval_prompts.items()
             ],
+            "accounts": self.state.data.get("accounts", []),
+            "groups": self.state.data.get("groups", []),
+            "interfaces": self.state.data.get("interfaces", {}),
         }
