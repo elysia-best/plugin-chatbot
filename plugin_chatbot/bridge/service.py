@@ -235,6 +235,7 @@ class BridgeState:
             account.setdefault("persona_prompt", "")
             account.setdefault("enabled_tools", None)
             account.setdefault("context_length", None)
+            account.setdefault("provider_id", "")
             if not account.get("name_source"):
                 account["name_source"] = (
                     "fallback"
@@ -449,7 +450,7 @@ class BridgeService:
                 return group
         return None
 
-    def effective_chat_config(
+    def effective_chat_config(  # noqa: C901
         self, platform: str, bot_id: str, kind: str, peer_id: str
     ) -> dict[str, Any]:
         """Merge account defaults and group overrides for one conversation."""
@@ -457,26 +458,62 @@ class BridgeService:
         group = (
             self.group_config(platform, bot_id, peer_id) if kind == "group" else None
         )
+        providers = self.state.data.get("interfaces", {}).get("providers", [])
+        provider: dict[str, Any] | None = None
+        account_provider_id = str(account.get("provider_id") or "")
+        if account_provider_id:
+            provider = next(
+                (
+                    row
+                    for row in providers
+                    if isinstance(row, dict)
+                    and str(row.get("id")) == account_provider_id
+                ),
+                None,
+            )
+        account_model = model_id(account.get("model"))
+        provider_model = model_id(provider.get("model")) if provider else ""
         merged: dict[str, Any] = {
-            "model": model_id(account.get("model")) or self.config.model,
-            "base_url": account.get("base_url") or self.config.base_url,
-            "api_key": account.get("api_key") or self.config.api_key,
+            "model": account_model or provider_model or self.config.model,
+            "base_url": (provider or {}).get("base_url")
+            or account.get("base_url")
+            or self.config.base_url,
+            "api_key": (provider or {}).get("api_key")
+            or account.get("api_key")
+            or self.config.api_key,
             "reasoning_effort": account.get("reasoning_effort")
             or self.config.reasoning_effort,
             "system_prompt": self._account_persona(account),
             "cost_limit": account.get("cost_limit"),
-            "max_context": positive_context_length(account.get("context_length"))
+            "max_context": positive_context_length(
+                (provider or {}).get("context_length")
+            )
+            or positive_context_length(account.get("context_length"))
             or self.config.max_context,
         }
-        provider: dict[str, Any] | None = None
+        if provider:
+            selected_model = str(merged.get("model") or "")
+            model_record = next(
+                (
+                    model
+                    for model in provider.get("models", [])
+                    if isinstance(model, dict) and model.get("id") == selected_model
+                ),
+                None,
+            )
+            if model_record:
+                merged["max_context"] = (
+                    positive_context_length(model_record.get("context_length"))
+                    or merged["max_context"]
+                )
         if group:
             provider_id = group.get("provider_id")
             if provider_id:
                 provider = next(
                     (
                         row
-                        for row in self.state.data["interfaces"]["providers"]
-                        if row.get("id") == provider_id
+                        for row in providers
+                        if isinstance(row, dict) and row.get("id") == provider_id
                     ),
                     None,
                 )

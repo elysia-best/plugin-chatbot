@@ -236,6 +236,63 @@ class BridgeServiceTests(unittest.TestCase):
         self.assertEqual("https://provider.example/v1", config["base_url"])
         self.assertEqual(64_000, config["max_context"])
 
+    def test_account_provider_supplies_runtime_connection_and_model(self) -> None:
+        self.service.state.data["accounts"] = [
+            {
+                "id": "a1",
+                "platform": "onebot",
+                "bot_id": "100",
+                "provider_id": "p1",
+                "model": "",
+                "context_length": 12_000,
+            }
+        ]
+        self.service.state.data["interfaces"]["providers"] = [
+            {
+                "id": "p1",
+                "model": "provider-default",
+                "base_url": "https://provider.example/v1",
+                "api_key": "provider-key",
+                "context_length": 32_000,
+                "models": [
+                    {"id": "provider-default", "context_length": 64_000}
+                ],
+            }
+        ]
+        config = self.service.effective_chat_config(
+            "onebot", "100", "private", "user"
+        )
+        self.assertEqual("provider-default", config["model"])
+        self.assertEqual("https://provider.example/v1", config["base_url"])
+        self.assertEqual("provider-key", config["api_key"])
+        self.assertEqual(64_000, config["max_context"])
+
+    def test_account_model_overrides_provider_default(self) -> None:
+        self.service.state.data["accounts"] = [
+            {
+                "id": "a1",
+                "platform": "onebot",
+                "bot_id": "100",
+                "provider_id": "p1",
+                "model": "account-model",
+            }
+        ]
+        self.service.state.data["interfaces"]["providers"] = [
+            {
+                "id": "p1",
+                "model": "provider-model",
+                "models": [
+                    {"id": "account-model", "context_length": 48_000},
+                    {"id": "provider-model", "context_length": 32_000},
+                ],
+            }
+        ]
+        config = self.service.effective_chat_config(
+            "onebot", "100", "private", "user"
+        )
+        self.assertEqual("account-model", config["model"])
+        self.assertEqual(48_000, config["max_context"])
+
     def test_account_and_group_tool_selection_inherits_and_overrides(self) -> None:
         self.service.state.data["accounts"] = [
             {
