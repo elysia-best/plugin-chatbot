@@ -9,11 +9,13 @@ import unittest
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any, cast
 from unittest.mock import AsyncMock, patch
 
 from nonebot_plugin_alconna import Target
 
 from agent.llm import LLMClient
+from agent.messages import Message
 from agent.tool import ToolContext
 from plugin_chatbot.bridge.service import (
     BridgeConfig,
@@ -37,11 +39,23 @@ class BridgeServiceTests(unittest.TestCase):
             BridgeConfig(
                 state_dir=root / "state",
                 workspace=root,
-                owner_ids={"owner"},
-                allowed_groups={"room-1"},
-                allowed_private={"friend-1"},
             )
         )
+        self.service.state.data["accounts"] = [
+            {
+                "id": "test-bot",
+                "platform": "test",
+                "bot_id": "bot",
+                "admins": [{"id": "owner", "kind": "private", "name": "Owner"}],
+                "whitelist": [
+                    {"id": "room-1", "kind": "group", "name": "Room 1"},
+                    {"id": "friend-1", "kind": "private", "name": "Friend 1"},
+                ],
+                "blacklist": [],
+                "private_users": [],
+            }
+        ]
+        self.service.state.save()
 
     def tearDown(self) -> None:
         self.temp.cleanup()
@@ -77,18 +91,27 @@ class BridgeServiceTests(unittest.TestCase):
         self.assertNotEqual(key, conversation_key("example", "bot", "private", "42"))
 
     def test_allowlist_defaults_to_deny_and_owner_bypasses(self) -> None:
-        self.assertTrue(self.service.is_allowed("group", "room-1", "member"))
-        self.assertFalse(self.service.is_allowed("group", "room-2", "member"))
-        self.assertTrue(self.service.is_allowed("group", "room-2", "owner"))
+        self.assertTrue(self.service.is_allowed("group", "room-1", "member", "test", "bot"))
+        self.assertFalse(self.service.is_allowed("group", "room-2", "member", "test", "bot"))
+        self.assertTrue(self.service.is_allowed("group", "room-2", "owner", "test", "bot"))
 
     def test_private_target_id_can_identify_owner(self) -> None:
-        self.service.config.owner_ids = {"qq-private-openid"}
+        self.service.state.data["accounts"].append(
+            {
+                "id": "qq-bot",
+                "platform": "qq",
+                "bot_id": "bot",
+                "admins": [{"id": "qq-private-openid", "kind": "private"}],
+                "whitelist": [],
+                "blacklist": [],
+            }
+        )
         self.assertTrue(
-            self.service.is_admin("different-event-openid", "qq-private-openid")
+            self.service.is_admin("different-event-openid", "qq-private-openid", "qq", "bot")
         )
         self.assertTrue(
             self.service.is_allowed(
-                "private", "qq-private-openid", "different-event-openid"
+                "private", "qq-private-openid", "different-event-openid", "qq", "bot"
             )
         )
         key, chat_id = self.service.resolve_chat(
@@ -113,6 +136,67 @@ class BridgeServiceTests(unittest.TestCase):
         )
         self.assertEqual(first, second)
         self.assertEqual(chat_id, restored_chat)
+
+    def test_pending_approval_rejection_and_account_isolation(self) -> None:
+        key, _chat_id = self.service.resolve_chat("test", "bot", "group", "new-room")
+        self.assertEqual("pending", self.service.state.data["conversations"][key]["status"])
+        self.assertFalse(self.service.is_allowed("group", "new-room", "member", "test", "bot"))
+
+        self.service.set_conversation_status(key, "approved")
+        self.assertTrue(self.service.is_allowed("group", "new-room", "member", "test", "bot"))
+        self.assertFalse(self.service.is_allowed("group", "new-room", "member", "test", "other"))
+
+        self.service.set_conversation_status(key, "rejected")
+        self.assertFalse(self.service.is_allowed("group", "new-room", "member", "test", "bot"))
+        self.assertNotIn(
+            "new-room",
+            self.service._access_ids(
+                self.service.state.data["accounts"][0]["whitelist"], "group"
+            ),
+        )
+        self.service.set_conversation_status(key, "approved")
+        restored = BridgeService(self.service.config)
+        self.assertEqual("approved", restored.state.data["conversations"][key]["status"])
+        self.assertTrue(restored.is_allowed("group", "new-room", "member", "test", "bot"))
+        self.assertNotIn("new-room", restored._access_ids(restored.state.data["accounts"][0]["blacklist"], "group"))
+
+    def test_unlisted_private_user_is_recorded_without_agent_reply(self) -> None:
+        incoming = IncomingMessage(
+            bot=None,
+            platform="test",
+            bot_id="bot",
+            kind="private",
+            peer_id="target-openid",
+            user_id="user-openid",
+            user_name="Visitor",
+            text="hello",
+            target=Target("target-openid"),
+        )
+        self.assertEqual("", asyncio.run(self.service._process_message(incoming)))
+        key = conversation_key("test", "bot", "private", "target-openid")
+        self.assertEqual("pending", self.service.state.data["conversations"][key]["status"])
+        self.assertEqual("user-openid", self.service.state.data["conversations"][key]["user_id"])
+        self.assertEqual(
+            {"id": "user-openid", "name": "Visitor"},
+            self.service.state.data["accounts"][0]["private_users"][0],
+        )
+
+    def test_clearing_one_conversation_persists_and_keeps_other(self) -> None:
+        first, first_chat = self.service.resolve_chat("test", "bot", "group", "room-1")
+        _second, second_chat = self.service.resolve_chat("test", "bot", "private", "friend-1")
+        self.service.store.append(first_chat, Message(role="user", content="group message"))
+        self.service.store.append(second_chat, Message(role="user", content="private message"))
+        self.service.store.save(first_chat)
+        self.service.store.save(second_chat)
+        self.service.store.replace(first_chat, [])
+        self.service.agents.pop(first, None)
+
+        restored = BridgeService(self.service.config)
+        self.assertEqual([], restored.store.load_messages(first_chat))
+        self.assertEqual("private message", restored.store.load_messages(second_chat)[0].content)
+        record = restored.store.get(first_chat)
+        self.assertIsNotNone(record)
+        self.assertEqual(0, record.message_count if record else None)
 
     def test_account_and_group_config_are_scoped_by_adapter_and_bot(self) -> None:
         self.service.state.data["accounts"] = [
@@ -414,7 +498,7 @@ class BridgeServiceTests(unittest.TestCase):
                 status="success", text="[SILENT]", usage=usage, tool_calls=[]
             )
             agent = SimpleNamespace(run=AsyncMock(return_value=result))
-            self.service._agent = lambda *_args, **_kwargs: agent
+            self.service._agent = cast("Any", lambda *_args, **_kwargs: agent)
             incoming = IncomingMessage(
                 bot=None,
                 platform="test",
@@ -477,7 +561,7 @@ class BridgeServiceTests(unittest.TestCase):
         self.assertIsNone(audit_reply("普通聊天内容"))
 
     def test_chat_tools_are_allowlisted_by_agent_permissions(self) -> None:
-        self.service.config.reasoning_effort = "high"
+        self.service.state.data["accounts"][0]["reasoning_effort"] = "high"
         key, chat_id = self.service.resolve_chat("test", "bot", "private", "friend-1")
         agent = self.service._agent(key, chat_id, owner=False)
         send_tool = next(tool for tool in agent._tools if tool.name == "chat_send")

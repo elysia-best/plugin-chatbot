@@ -66,16 +66,28 @@ class LLMClient:
         reasoning_effort: str | None = None,
         timeout: float = 120.0,
         client: Any | None = None,
+        *,
+        allow_environment_fallback: bool = True,
     ) -> None:
-        self.model = model or os.getenv("OPENAI_MODEL", "")
-        base = base_url or os.getenv("OPENAI_BASE_URL") or None
-        key = api_key or os.getenv("OPENAI_API_KEY") or "EMPTY"
+        self.model = model or (
+            os.getenv("OPENAI_MODEL", "") if allow_environment_fallback else ""
+        )
+        base = base_url or (
+            os.getenv("OPENAI_BASE_URL") if allow_environment_fallback else None
+        ) or None
+        key = api_key or (
+            os.getenv("OPENAI_API_KEY") if allow_environment_fallback else None
+        ) or "EMPTY"
         self.temperature = temperature
         self.max_tokens = max_tokens
         effort = (
             reasoning_effort
             if reasoning_effort is not None
-            else os.getenv("OPENAI_REASONING_EFFORT", "")
+            else (
+                os.getenv("OPENAI_REASONING_EFFORT", "")
+                if allow_environment_fallback
+                else ""
+            )
         )
         self.reasoning_effort = effort.strip() or None
         # client 参数便于测试注入 mock

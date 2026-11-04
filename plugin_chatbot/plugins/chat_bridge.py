@@ -5,9 +5,8 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
-import contextlib
-import json
 import secrets
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
@@ -40,15 +39,8 @@ MESSAGE_LOG_PREVIEW_CHARS = 120
 class Settings(BaseModel):
     """Configuration read from NoneBot's plugin configuration."""
 
-    agent_model: str = ""
-    agent_base_url: str = ""
-    agent_api_key: str = ""
-    agent_reasoning_effort: str = ""
     agent_workspace: str = ""
     bridge_state_dir: str = ""
-    bridge_owner_ids: str | int | list[str | int] = ""
-    bridge_allowed_groups: str | int | list[str | int] = ""
-    bridge_allowed_private: str | int | list[str | int] = ""
     bridge_mode: str = "chat"
     bridge_max_message_chars: int = 500
     bridge_max_messages_per_minute: int = 6
@@ -72,27 +64,6 @@ class Settings(BaseModel):
     bridge_output_cost_per_million: float = 0.0
 
 
-def _as_ids(value: Any) -> set[str]:
-    if isinstance(value, str):
-        text = value.strip()
-        if text.startswith("["):
-            with contextlib.suppress(json.JSONDecodeError):
-                value = json.loads(text)
-        if isinstance(value, str):
-            return {part.strip() for part in value.split(",") if part.strip()}
-    if isinstance(value, int) and not isinstance(value, bool):
-        return {str(value)}
-    if isinstance(value, (list, tuple, set)):
-        return {
-            str(part).strip()
-            for part in value
-            if isinstance(part, (str, int))
-            and not isinstance(part, bool)
-            and str(part).strip()
-        }
-    return set()
-
-
 _settings = get_plugin_config(Settings)
 _root = Path(__file__).resolve().parents[2]
 _workspace = Path(_settings.agent_workspace or _root).resolve()
@@ -101,13 +72,6 @@ _service = BridgeService(
     BridgeConfig(
         state_dir=_state_dir,
         workspace=_workspace,
-        model=_settings.agent_model,
-        base_url=_settings.agent_base_url,
-        api_key=_settings.agent_api_key,
-        reasoning_effort=_settings.agent_reasoning_effort.strip(),
-        owner_ids=_as_ids(_settings.bridge_owner_ids),
-        allowed_groups=_as_ids(_settings.bridge_allowed_groups),
-        allowed_private=_as_ids(_settings.bridge_allowed_private),
         mode=cast(
             "Mode",
             _settings.bridge_mode
@@ -398,13 +362,15 @@ async def _handle_message(bot: Bot, event: Event) -> None:  # noqa: C901
                 "enabled": True,
                 "provider_id": "",
                 "model": "",
-                "base_url": "",
-                "api_key": "",
                 "reasoning_effort": "",
                 "context_length": None,
                 "persona_role": None,
                 "persona_prompt": "",
                 "enabled_tools": None,
+                "admins": [],
+                "whitelist": [],
+                "blacklist": [],
+                "private_users": [],
                 "groups": [],
             }
         )
@@ -515,8 +481,6 @@ async def _create_account(body: dict[str, Any]) -> dict[str, Any]:
         "enabled": bool(body.get("enabled", True)),
         "provider_id": str(body.get("provider_id") or ""),
         "model": str(body.get("model") or ""),
-        "base_url": str(body.get("base_url") or ""),
-        "api_key": str(body.get("api_key") or ""),
         "reasoning_effort": str(body.get("reasoning_effort") or ""),
         "context_length": positive_context_length(body.get("context_length")),
         "persona_role": str(body.get("persona_role") or "") or None,
@@ -524,6 +488,10 @@ async def _create_account(body: dict[str, Any]) -> dict[str, Any]:
         "enabled_tools": body.get("enabled_tools")
         if isinstance(body.get("enabled_tools"), list)
         else None,
+        "admins": [],
+        "whitelist": [],
+        "blacklist": [],
+        "private_users": [],
         "groups": [],
     }
     _service.state.data["accounts"].append(row)
@@ -544,8 +512,6 @@ async def _update_account(row_id: str, body: dict[str, Any]) -> dict[str, Any]:
         "bot_id",
         "provider_id",
         "model",
-        "base_url",
-        "api_key",
         "reasoning_effort",
         "context_length",
         "persona_role",
@@ -784,6 +750,81 @@ async def _logs(limit: int = 200) -> dict[str, Any]:
     }
 
 
+@_api.put("/api/accounts/{row_id}/access", dependencies=[Depends(_authorize)])
+async def _update_account_access(  # noqa: C901
+    row_id: str, body: dict[str, list[dict[str, str]]]
+) -> dict[str, Any]:
+    account = _find_row(_service.state.data["accounts"], row_id)
+    if account is None:
+        raise HTTPException(status_code=404, detail="Account not found")
+    validated: dict[str, list[dict[str, str]]] = {}
+    for field in ("admins", "whitelist", "blacklist"):
+        rows = body.get(field)
+        if not isinstance(rows, list):
+            raise HTTPException(status_code=422, detail=f"{field} must be a list")
+        normalized = []
+        for row in rows:
+            if not isinstance(row, dict):
+                raise HTTPException(status_code=422, detail=f"Invalid {field} entry")
+            entry_id = str(row.get("id") or "").strip()
+            kind = "private" if field == "admins" else str(row.get("kind") or "")
+            if not entry_id or kind not in {"private", "group"}:
+                raise HTTPException(status_code=422, detail=f"Invalid {field} entry")
+            if field == "admins" and kind != "private":
+                raise HTTPException(
+                    status_code=422, detail="Admins must be private users"
+                )
+            normalized.append(
+                {"id": entry_id, "kind": kind, "name": str(row.get("name") or "")[:120]}
+            )
+        validated[field] = normalized
+    account.update(validated)
+    for record in _service.state.data["conversations"].values():
+        if (record.get("platform"), record.get("bot_id")) != (
+            account.get("platform"), account.get("bot_id")
+        ):
+            continue
+        listed = _service.is_allowed(
+            str(record.get("kind", "private")),
+            str(record.get("peer_id", "")),
+            str(record.get("user_id", "")),
+            str(record.get("platform", "")),
+            str(record.get("bot_id", "")),
+        )
+        kind = "group" if record.get("kind") == "group" else "private"
+        blacklisted = str(record.get("peer_id", "")) in _service._access_ids(
+            account["blacklist"], kind
+        )
+        next_status = "approved" if listed else "rejected" if blacklisted else "pending"
+        if record.get("status") != next_status:
+            record["status"] = next_status
+            record["confirmed_at"] = time.time() if next_status == "approved" else None
+    _service.agents.clear()
+    _service.state.save()
+    return {
+        key: account[key]
+        for key in ("admins", "whitelist", "blacklist", "private_users")
+    }
+
+
+@_api.put(
+    "/api/conversations/{conversation_key}/status",
+    dependencies=[Depends(_authorize)],
+)
+async def _update_conversation_status(
+    conversation_key: str, body: dict[str, str]
+) -> dict[str, Any]:
+    status = str(body.get("status") or "")
+    try:
+        updated = _service.set_conversation_status(conversation_key, status)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Conversation not found") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    _service.state.save()
+    return updated
+
+
 @_api.get(
     "/api/conversations/{conversation_key}",
     dependencies=[Depends(_authorize)],
@@ -858,8 +899,6 @@ class SlangSettingsRequest(BaseModel):
 async def _set_mode(body: UpdateRequest) -> dict[str, str]:
     if body.value not in {"chat", "agent"}:
         raise HTTPException(status_code=422, detail="Invalid mode")
-    if body.value == "agent" and not _service.config.owner_ids:
-        raise HTTPException(status_code=409, detail="Configure bridge_owner_ids first")
     _service.set_mode(cast("Mode", body.value))
     return {"mode": body.value}
 
@@ -931,11 +970,12 @@ async def _reset_chat(conversation_key: str) -> dict[str, bool]:
     record = _service.state.data["conversations"].get(conversation_key)
     if not record:
         raise HTTPException(status_code=404, detail="Conversation not found")
-    messages = _service.store.load_messages(record["chat_id"])
-    cleared = bool(messages)
-    _service.store.replace(record["chat_id"], [])
-    _service.agents.pop(conversation_key, None)
-    _service.state.save()
+    lock = _service.locks.setdefault(conversation_key, asyncio.Lock())
+    async with lock:
+        messages = _service.store.load_messages(record["chat_id"])
+        cleared = bool(messages)
+        _service.store.replace(record["chat_id"], [])
+        _service.agents.pop(conversation_key, None)
     return {"reset": True, "cleared": cleared}
 
 

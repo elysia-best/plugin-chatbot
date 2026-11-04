@@ -5,8 +5,12 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from typing import cast
 from unittest.mock import AsyncMock, patch
 
+from nonebot_plugin_alconna import Target
+
+from agent import Agent, ToolContext
 from agent.llm import LLMResponse
 from agent.messages import Message, ToolCall
 from agent.store import SessionStore
@@ -170,6 +174,7 @@ class MemeToolTests(unittest.IsolatedAsyncioTestCase):
 
         with tempfile.TemporaryDirectory() as temp:
             service = BridgeService(BridgeConfig(state_dir=Path(temp), workspace=Path(temp)))
+            context = ToolContext(workspace=temp)
             key, _chat_id = service.resolve_chat("QQ", "bot", "group", "room")
             png = b"\x89PNG\r\n\x1a\nimage"
             block = {
@@ -192,18 +197,18 @@ class MemeToolTests(unittest.IsolatedAsyncioTestCase):
                     return LLMResponse(content=self.content)
 
             llm = ReviewLLM('{"decision":"allow","name":"开心点赞"}')
-            service.agents[key] = SimpleNamespace(_llm=llm)
+            service.agents[key] = cast("Agent", SimpleNamespace(_llm=llm))
             service.current_images[key] = [block]
             save_tool = next(t for t in service.chat_tools(key) if t.name == "chat_save_meme")
-            result = await save_tool.call({"image_index": 1}, SimpleNamespace())
+            result = await save_tool.call({"image_index": 1}, context)
             self.assertEqual("表情包已保存：开心点赞.png", result)
-            self.assertIn("JSON", llm.system_prompt)
+            self.assertIn("JSON", llm.system_prompt or "")
             self.assertEqual(block, llm.messages[0].content[1])
             self.assertEqual(1, len(service.memes.list()))
 
             tools = {tool.name: tool for tool in service.chat_tools(key)}
-            self.assertIn("开心点赞.png", await tools["chat_list_memes"].call({}, None))
-            service.targets[key] = object()
+            self.assertIn("开心点赞.png", await tools["chat_list_memes"].call({}, context))
+            service.targets[key] = Target("room")
             service.bots[key] = object()
             fake_image = SimpleNamespace(send=AsyncMock())
             with patch(
@@ -211,7 +216,7 @@ class MemeToolTests(unittest.IsolatedAsyncioTestCase):
                 return_value=fake_image,
             ) as image_factory:
                 sent = await tools["chat_send_meme"].call(
-                    {"name": "开心点赞.png"}, None
+                    {"name": "开心点赞.png"}, context
                 )
             self.assertEqual("表情包已发送：开心点赞.png", sent)
             image_factory.assert_called_once()
@@ -222,7 +227,7 @@ class MemeToolTests(unittest.IsolatedAsyncioTestCase):
                 "not json",
             ):
                 service.agents[key]._llm = ReviewLLM(answer)
-                result = await save_tool.call({"image_index": 1}, SimpleNamespace())
+                result = await save_tool.call({"image_index": 1}, context)
                 self.assertIn("Error:", result)
             self.assertEqual(1, len(service.memes.list()))
 

@@ -128,6 +128,7 @@ class Agent:
         reasoning_effort: str | None = None,
         project_memory_enabled: bool = True,
         project_memory_tools_enabled: bool = True,
+        allow_environment_fallback: bool = True,
     ) -> None:
         self.system_prompt = system_prompt or (
             "You are a coding agent operating in a workspace. "
@@ -161,6 +162,7 @@ class Agent:
             temperature=temperature,
             reasoning_effort=reasoning_effort,
             timeout=timeout,
+            allow_environment_fallback=allow_environment_fallback,
         )
         self._tools = list(tools if tools is not None else builtin_tools())
         if self.project_memories and project_memory_tools_enabled:

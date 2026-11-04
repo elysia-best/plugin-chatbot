@@ -7,14 +7,7 @@
 Add `plugin_chatbot.plugins.chat_bridge` to the NoneBot plugin load list (or configure the project plugin directory in `pyproject.toml`), then set the following values in the NoneBot environment:
 
 ```dotenv
-AGENT_MODEL=your-model
-AGENT_BASE_URL=https://your-openai-compatible-endpoint/v1
-AGENT_API_KEY=your-key
-AGENT_REASONING_EFFORT=medium
 AGENT_WORKSPACE=D:/path/to/workspace
-BRIDGE_OWNER_IDS=123456,234567
-BRIDGE_ALLOWED_GROUPS=group-a,group-b
-BRIDGE_ALLOWED_PRIVATE=user-a,user-b
 BRIDGE_STATE_DIR=D:/path/to/private-bridge-state
 BRIDGE_MODE=chat
 BRIDGE_MAX_MESSAGE_CHARS=500
@@ -34,22 +27,22 @@ BRIDGE_INPUT_COST_PER_MILLION=0
 BRIDGE_OUTPUT_COST_PER_MILLION=0
 ```
 
-Without configured owner IDs or allowlists, only configured owners can use the bridge. The default state path is `<project>/.agent/bridge`; keep it private because it contains conversation mappings, activity, and usage records. The management console is mounted at `/chat-agent/` on the existing NoneBot FastAPI server. The console token is generated and saved under the state directory if none is configured.
+Configure each Bot's administrator, white, and black lists in the **平台账号** editor. Newly discovered conversations stay **待确认** until an administrator approves them or adds them to the white list. The default state path is `<project>/.agent/bridge`; keep it private because it contains conversation mappings, activity, and usage records. The management console is mounted at `/chat-agent/` on the existing NoneBot FastAPI server. The console token is generated and saved under the state directory if none is configured.
 
-`AGENT_REASONING_EFFORT` is optional and is forwarded as `reasoning_effort` to the configured OpenAI-compatible model. Use a value supported by that provider, commonly `low`, `medium`, or `high`. Project memories are shared by chats using the same `AGENT_WORKSPACE`; the `MEMORY.md` index and individual Markdown entries live under `<AGENT_WORKSPACE>/.agent/memory/`. The console's **项目记忆** page can create, edit, and delete entries. Agents can read memories, while only configured owners can write them through chat.
+Configure the model connection under **接口能力**, then select that Provider and model on the Bot account. Reasoning effort is configured per account or group. Memories are shared by chats using the same `AGENT_WORKSPACE`; the `MEMORY.md` index and individual Markdown entries live under `<AGENT_WORKSPACE>/.agent/memory/`. The console's **记忆管理** page can create, edit, and delete entries and review group slang. Agents can read memories, while only Bot administrators can write them through chat.
 
 ## Behavior
 
 - `chat` exposes conversation tools and read-only `WebSearch`, then sends the final reply. Configure `BRAVE_API_KEY` in the process environment to enable searches.
-- `agent` accepts only owner private messages and adds this repository's coding tools. Normal Agent permission rules and the approval callback still apply.
+- `agent` accepts only administrator private messages and adds this repository's coding tools. Normal Agent permission rules and the approval callback still apply.
 - Both modes include the configured persona or active role card in the system prompt. Agent mode also keeps that persona while using coding tools.
 - The console's session table lets administrators choose enabled tools per conversation. New sessions enable all tools available in the current mode; changing modes clears session overrides and restores each session's defaults.
-- `/status`, `/reset`, `/role [name|off]`, `/silent`, `/active`, `/mode <mode>`, and `/approve <yes|no>` are available to permitted chat users; state-changing commands require an owner.
+- `/status`, `/reset`, `/role [name|off]`, `/silent`, `/active`, `/mode <mode>`, and `/approve <yes|no>` are available to permitted chat users; state-changing commands require a Bot administrator.
 - Chat targets are allowlisted by group or private peer. Replies are checked for credential-like values and local paths before sending, then split at configured message length.
 - Incoming images are passed to vision-capable OpenAI-compatible models through Alconna's image fetch helper and size-limited inline data. Unsupported media remains an explicit text notice.
 - Speech uses a confined local audio library and offline `pyttsx3`; install `pyttsx3` plus a system speech engine to use synthesis. Adapters that cannot send audio return an error.
 - Group slang extraction is rate-limited, researches candidates with the Agent's `WebSearch` / `WebFetch` tools, and leaves every result for administrator review before prompt injection.
-- The console provides persona and role-card management, project-memory management, initial prompts, approvals, conversation reset, activity, token and estimated-cost records, slang review, and audio-library management. Set input/output cost rates per million tokens to enable cost estimates.
+- The console provides persona and role-card management, global memory and slang management, initial prompts, approvals, and per-group or per-private-chat Agent transcripts with a clear button. It also shows activity, token and estimated-cost records and audio-library management. Set input/output cost rates per million tokens to enable cost estimates.
 
 Bridge persistence is separate from the Agent's normal coding sessions. Message transport always goes through Alconna abstractions; features such as native reply references depend on the adapter's exported segment support.
 
@@ -74,11 +67,11 @@ npm run build
 
 The management panel now keeps configuration in three layers:
 
-- **Account**: `adapter/platform + bot_id` identifies one connected Bot. Each Bot can have its own OpenAI-compatible endpoint, model, API key, reasoning effort, context fallback, persona template, supplement prompt, and enabled tools.
+- **Account**: `adapter/platform + bot_id` identifies one connected Bot. Each Bot selects a configured Provider and model and has its own reasoning effort, context fallback, persona template, supplement prompt, enabled tools, and access lists.
 - **Group**: `adapter/platform + bot_id + group_id` identifies one group attached to one Bot. Group settings can override provider, model, prompt, reply frequency, reasoning effort, cost limit, and enabled tools.
 - **Interfaces**: providers, skills, MCP servers, rules, and the runtime tool catalog are managed from the console. Provider records expose model discovery and preserve recognized context-window metadata for transcript compression.
 
-Account and group records are stored in `bridge-state.json` under `BRIDGE_STATE_DIR`. Existing environment variables remain as fallback defaults, so an installation can be upgraded without rewriting its NoneBot configuration.
+Account and group records are stored in `bridge-state.json` under `BRIDGE_STATE_DIR`. The old `AGENT_MODEL`, `AGENT_BASE_URL`, `AGENT_API_KEY`, `AGENT_REASONING_EFFORT`, `BRIDGE_OWNER_IDS`, `BRIDGE_ALLOWED_GROUPS`, and `BRIDGE_ALLOWED_PRIVATE` settings are no longer used by the bridge.
 
 The **人格提示** workbench manages reusable role templates. An account can select
 one template and add a private supplement; a group prompt, when present, fully

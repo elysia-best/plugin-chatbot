@@ -240,6 +240,7 @@ class SessionStore:
         cached[:] = messages
         self._write_cursor[resolved] = len(messages)
         record = self._read_record(resolved) or SessionRecord(chat_id=resolved)
+        record.message_count = len(messages)
         record.last_prompt_tokens = 0
         record.last_estimated_tokens = 0
         record.context_fingerprint = ""

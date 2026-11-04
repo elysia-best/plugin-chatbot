@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from agent import Agent, LLMClient, LLMResponse, ProjectMemoryStore
 from agent.memory import project_memory_tools
@@ -160,6 +160,36 @@ class ProjectMemoryTests(unittest.IsolatedAsyncioTestCase):
                 client = LLMClient(model="test")
                 self.assertEqual("low", client.reasoning_effort)
                 await client._client.close()
+
+    async def test_environment_fallback_can_be_disabled(self) -> None:
+        environment = {
+            "OPENAI_MODEL": "environment-model",
+            "OPENAI_BASE_URL": "https://environment.example/v1",
+            "OPENAI_API_KEY": "environment-key",
+            "OPENAI_REASONING_EFFORT": "high",
+        }
+        with patch.dict(os.environ, environment):
+            sdk_client = SimpleNamespace(close=AsyncMock())
+            with patch("agent.llm.AsyncOpenAI", return_value=sdk_client) as create_client:
+                client = LLMClient(allow_environment_fallback=False)
+            self.assertEqual("", client.model)
+            self.assertIsNone(client.reasoning_effort)
+            create_client.assert_called_once_with(
+                base_url=None, api_key="EMPTY", timeout=120.0
+            )
+
+            with tempfile.TemporaryDirectory() as temp:
+                with patch(
+                    "agent.llm.AsyncOpenAI",
+                    return_value=SimpleNamespace(close=AsyncMock()),
+                ):
+                    agent = Agent(workspace=temp, allow_environment_fallback=False)
+                llm = agent._llm
+                if not isinstance(llm, LLMClient):
+                    self.fail("Agent did not create an LLMClient")
+                self.assertEqual("", llm.model)
+                self.assertIsNone(llm.reasoning_effort)
+                await agent.close()
 
     async def test_llm_client_sends_reasoning_effort(self) -> None:
         class FakeCompletions:
