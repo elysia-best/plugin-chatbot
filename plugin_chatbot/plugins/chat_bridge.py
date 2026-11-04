@@ -784,6 +784,25 @@ async def _logs(limit: int = 200) -> dict[str, Any]:
     }
 
 
+@_api.get(
+    "/api/conversations/{conversation_key}",
+    dependencies=[Depends(_authorize)],
+)
+async def _conversation_detail(
+    conversation_key: str, limit: int = 1000
+) -> dict[str, Any]:
+    """Return one bridge conversation and its persisted transcript."""
+    record = _service.state.data["conversations"].get(conversation_key)
+    if record is None:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    bounded = max(1, min(limit, 2000))
+    messages = _service.store.load_messages(str(record["chat_id"]))
+    return {
+        **record,
+        "messages": [message.to_dict() for message in messages[-bounded:]],
+    }
+
+
 @_api.post("/api/approvals/{conversation_key}", dependencies=[Depends(_authorize)])
 async def _resolve_approval(
     conversation_key: str, body: dict[str, bool]
@@ -912,11 +931,12 @@ async def _reset_chat(conversation_key: str) -> dict[str, bool]:
     record = _service.state.data["conversations"].get(conversation_key)
     if not record:
         raise HTTPException(status_code=404, detail="Conversation not found")
-    _service.store.cache(record["chat_id"]).clear()
-    _service.store.save(record["chat_id"])
+    messages = _service.store.load_messages(record["chat_id"])
+    cleared = bool(messages)
+    _service.store.replace(record["chat_id"], [])
     _service.agents.pop(conversation_key, None)
     _service.state.save()
-    return {"reset": True}
+    return {"reset": True, "cleared": cleared}
 
 
 @_api.get("/api/slang", dependencies=[Depends(_authorize)])
