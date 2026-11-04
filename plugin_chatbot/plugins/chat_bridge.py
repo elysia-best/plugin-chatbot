@@ -458,6 +458,13 @@ def _find_row(rows: list[dict[str, Any]], row_id: str) -> dict[str, Any] | None:
     return next((row for row in rows if str(row.get("id")) == row_id), None)
 
 
+def _memory_interval(value: Any) -> int:
+    try:
+        return max(1, min(1000, int(value)))
+    except (TypeError, ValueError, OverflowError):
+        raise HTTPException(status_code=422, detail="Invalid memory interval") from None
+
+
 @_api.get("/api/accounts", dependencies=[Depends(_authorize)])
 async def _accounts() -> list[dict[str, Any]]:
     return _service.state.data["accounts"]
@@ -488,6 +495,9 @@ async def _create_account(body: dict[str, Any]) -> dict[str, Any]:
         "enabled_tools": body.get("enabled_tools")
         if isinstance(body.get("enabled_tools"), list)
         else None,
+        "memory_enabled": bool(body.get("memory_enabled", True)),
+        "memory_interval": _memory_interval(body.get("memory_interval", 50) or 50),
+        "memory_buffer": [],
         "admins": [],
         "whitelist": [],
         "blacklist": [],
@@ -518,9 +528,15 @@ async def _update_account(row_id: str, body: dict[str, Any]) -> dict[str, Any]:
         "persona_prompt",
         "enabled",
         "enabled_tools",
+        "memory_enabled",
+        "memory_interval",
     ):
         if key in body:
             row[key] = body[key]
+    if "memory_interval" in body:
+        row["memory_interval"] = _memory_interval(body["memory_interval"])
+    if "memory_enabled" in body:
+        row["memory_enabled"] = bool(body["memory_enabled"])
     if "name" in body:
         row["name_source"] = "manual" if str(body["name"]).strip() else "fallback"
     _service.state.save()
@@ -751,8 +767,8 @@ async def _logs(limit: int = 200) -> dict[str, Any]:
 
 
 @_api.put("/api/accounts/{row_id}/access", dependencies=[Depends(_authorize)])
-async def _update_account_access(  # noqa: C901
-    row_id: str, body: dict[str, list[dict[str, str]]]
+async def _update_account_access(  # noqa: C901, PLR0912
+    row_id: str, body: dict[str, Any]
 ) -> dict[str, Any]:
     account = _find_row(_service.state.data["accounts"], row_id)
     if account is None:
@@ -764,6 +780,16 @@ async def _update_account_access(  # noqa: C901
             raise HTTPException(status_code=422, detail=f"{field} must be a list")
         normalized = []
         for row in rows:
+            if isinstance(row, (str, int)):
+                entry_id = str(row).strip()
+                if not entry_id:
+                    continue
+                # Untyped legacy IDs used to match both private and group peers.
+                kinds = ("private",) if field == "admins" else ("private", "group")
+                normalized.extend(
+                    {"id": entry_id, "kind": kind, "name": ""} for kind in kinds
+                )
+                continue
             if not isinstance(row, dict):
                 raise HTTPException(status_code=422, detail=f"Invalid {field} entry")
             entry_id = str(row.get("id") or "").strip()
@@ -774,9 +800,13 @@ async def _update_account_access(  # noqa: C901
                 raise HTTPException(
                     status_code=422, detail="Admins must be private users"
                 )
-            normalized.append(
-                {"id": entry_id, "kind": kind, "name": str(row.get("name") or "")[:120]}
-            )
+            entry = {
+                "id": entry_id,
+                "kind": kind,
+                "name": str(row.get("name") or "")[:120],
+            }
+            if entry not in normalized:
+                normalized.append(entry)
         validated[field] = normalized
     account.update(validated)
     for record in _service.state.data["conversations"].values():
@@ -1188,6 +1218,182 @@ async def _delete_memory(name: str) -> dict[str, bool]:
     return {"deleted": True}
 
 
+@_api.get("/api/accounts/{row_id}/memories", dependencies=[Depends(_authorize)])
+async def _bot_memories(row_id: str) -> list[dict[str, Any]]:
+    account = _find_row(_service.state.data["accounts"], row_id)
+    if account is None:
+        raise HTTPException(status_code=404, detail="Account not found")
+    return _service.bot_memory_store(account).list()
+
+
+@_api.get(
+    "/api/accounts/{row_id}/memories/{name}", dependencies=[Depends(_authorize)]
+)
+async def _get_bot_memory(row_id: str, name: str) -> dict[str, Any]:
+    account = _find_row(_service.state.data["accounts"], row_id)
+    if account is None:
+        raise HTTPException(status_code=404, detail="Account not found")
+    try:
+        return _service.bot_memory_store(account).get(name)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Memory not found") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@_api.post(
+    "/api/accounts/{row_id}/memories", dependencies=[Depends(_authorize)]
+)
+async def _create_bot_memory(
+    row_id: str, body: ProjectMemoryRequest
+) -> dict[str, str]:
+    account = _find_row(_service.state.data["accounts"], row_id)
+    if account is None:
+        raise HTTPException(status_code=404, detail="Account not found")
+    store = _service.bot_memory_store(account)
+    try:
+        store.get(body.name)
+    except FileNotFoundError:
+        pass
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    else:
+        raise HTTPException(status_code=409, detail="Memory already exists")
+    try:
+        store.save(body.name, body.title, body.description, body.type, body.content)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    _service.agents.clear()
+    return {"name": body.name}
+
+
+@_api.put(
+    "/api/accounts/{row_id}/memories/{name}", dependencies=[Depends(_authorize)]
+)
+async def _update_bot_memory(
+    row_id: str, name: str, body: ProjectMemoryRequest
+) -> dict[str, str]:
+    account = _find_row(_service.state.data["accounts"], row_id)
+    if account is None:
+        raise HTTPException(status_code=404, detail="Account not found")
+    if name != body.name:
+        raise HTTPException(status_code=422, detail="Memory name cannot be changed")
+    store = _service.bot_memory_store(account)
+    try:
+        store.get(name)
+        store.save(body.name, body.title, body.description, body.type, body.content)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Memory not found") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    _service.agents.clear()
+    return {"name": name}
+
+
+@_api.delete(
+    "/api/accounts/{row_id}/memories/{name}", dependencies=[Depends(_authorize)]
+)
+async def _delete_bot_memory(row_id: str, name: str) -> dict[str, bool]:
+    account = _find_row(_service.state.data["accounts"], row_id)
+    if account is None:
+        raise HTTPException(status_code=404, detail="Account not found")
+    try:
+        _service.bot_memory_store(account).delete(name)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Memory not found") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    _service.agents.clear()
+    return {"deleted": True}
+
+
+@_api.get("/api/memory-queue", dependencies=[Depends(_authorize)])
+async def _memory_queue() -> list[dict[str, Any]]:
+    return sorted(
+        _service.state.data["memory_queue"],
+        key=lambda row: float(row.get("created_at", 0)),
+        reverse=True,
+    )
+
+
+@_api.patch("/api/memory-queue/{candidate_id}", dependencies=[Depends(_authorize)])
+async def _edit_memory_candidate(
+    candidate_id: str, body: ProjectMemoryRequest
+) -> dict[str, Any]:
+    candidate = _find_row(_service.state.data["memory_queue"], candidate_id)
+    if candidate is None:
+        raise HTTPException(status_code=404, detail="Memory candidate not found")
+    candidate.update(
+        {
+            "name": body.name,
+            "title": body.title,
+            "description": body.description,
+            "type": body.type,
+            "content": body.content,
+        }
+    )
+    _service.state.save()
+    return candidate
+
+
+@_api.post(
+    "/api/memory-queue/{candidate_id}/approve", dependencies=[Depends(_authorize)]
+)
+async def _approve_memory_candidate(
+    candidate_id: str, body: dict[str, str]
+) -> dict[str, str]:
+    candidate = _find_row(_service.state.data["memory_queue"], candidate_id)
+    if candidate is None:
+        raise HTTPException(status_code=404, detail="Memory candidate not found")
+    account = _find_row(
+        _service.state.data["accounts"], str(candidate.get("account_id") or "")
+    )
+    if account is None:
+        raise HTTPException(status_code=404, detail="Memory account not found")
+    name = str(body.get("name") or candidate.get("name") or "").strip()
+    store = _service.bot_memory_store(account)
+    try:
+        store.get(name)
+    except FileNotFoundError:
+        pass
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    else:
+        raise HTTPException(status_code=409, detail="Memory already exists")
+    try:
+        store.save(
+            name,
+            str(candidate.get("title") or ""),
+            str(candidate.get("description") or ""),
+            str(candidate.get("type") or "reference"),
+            str(candidate.get("content") or ""),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    _service.state.data["memory_queue"] = [
+        row
+        for row in _service.state.data["memory_queue"]
+        if str(row.get("id")) != candidate_id
+    ]
+    _service.state.save()
+    _service.agents.clear()
+    return {"name": name}
+
+
+@_api.delete(
+    "/api/memory-queue/{candidate_id}", dependencies=[Depends(_authorize)]
+)
+async def _delete_memory_candidate(candidate_id: str) -> dict[str, bool]:
+    before = len(_service.state.data["memory_queue"])
+    _service.state.data["memory_queue"] = [
+        row
+        for row in _service.state.data["memory_queue"]
+        if str(row.get("id")) != candidate_id
+    ]
+    _service.state.save()
+    return {"deleted": len(_service.state.data["memory_queue"]) < before}
+
+
 @_api.put("/api/active-role", dependencies=[Depends(_authorize)])
 async def _activate_role(body: dict[str, str | None]) -> dict[str, str | None]:
     name = body.get("name")
@@ -1305,8 +1511,9 @@ async def _initialize_bridge() -> None:
 
 @_driver.on_shutdown
 async def _close_agents() -> None:
-    for task in _service.slang_tasks:
+    for task in (*_service.slang_tasks, *_service.memory_tasks):
         task.cancel()
-    if _service.slang_tasks:
-        await asyncio.gather(*_service.slang_tasks, return_exceptions=True)
+    tasks = (*_service.slang_tasks, *_service.memory_tasks)
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
     await asyncio.gather(*(agent.close() for agent in _service.agents.values()))

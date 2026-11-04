@@ -181,6 +181,67 @@ class BridgeServiceTests(unittest.TestCase):
             self.service.state.data["accounts"][0]["private_users"][0],
         )
 
+    def test_memory_summary_is_queued_after_configured_inbound_message_count(self) -> None:
+        class SummaryLLM:
+            async def complete(self, messages, tools=None, system_prompt=None):
+                return SimpleNamespace(
+                    content=json.dumps(
+                        {
+                            "title": "沟通偏好",
+                            "description": "用户希望回答简洁",
+                            "type": "user",
+                            "content": "用户希望回答简洁。",
+                        },
+                        ensure_ascii=False,
+                    )
+                )
+
+        account = self.service.state.data["accounts"][0]
+        account["memory_enabled"] = True
+        account["memory_interval"] = 2
+        incoming = IncomingMessage(
+            bot=None,
+            platform="test",
+            bot_id="bot",
+            kind="private",
+            peer_id="friend-1",
+            user_id="friend-1",
+            user_name="Visitor",
+            text="请回答简洁一些",
+            target=Target("friend-1"),
+        )
+
+        async def exercise() -> None:
+            await self.service._record_memory_exchange(
+                account, incoming, "好的。", SummaryLLM()
+            )
+            self.assertEqual([], self.service.state.data["memory_queue"])
+            restored = BridgeService(self.service.config)
+            self.assertEqual(1, len(restored.state.data["accounts"][0]["memory_buffer"]))
+            await self.service._record_memory_exchange(
+                account, incoming, "我会简洁回答。", SummaryLLM()
+            )
+            await asyncio.gather(*list(self.service.memory_tasks))
+
+        asyncio.run(exercise())
+
+        self.assertEqual(1, len(self.service.state.data["memory_queue"]))
+        candidate = self.service.state.data["memory_queue"][0]
+        self.assertEqual("test-bot", candidate["account_id"])
+        self.assertEqual("pending", candidate["status"])
+        self.assertEqual(2, candidate["source_messages"])
+        self.assertEqual([], account["memory_buffer"])
+
+    def test_bot_memory_stores_are_isolated_per_account(self) -> None:
+        first = self.service.state.data["accounts"][0]
+        second = {"id": "other-bot", "platform": "test", "bot_id": "other"}
+        first_store = self.service.bot_memory_store(first)
+        second_store = self.service.bot_memory_store(second)
+        first_store.save("one", "First", "First bot memory", "project", "Only bot one")
+
+        self.assertEqual(["one"], [row["name"] for row in first_store.list()])
+        self.assertEqual([], second_store.list())
+
     def test_clearing_one_conversation_persists_and_keeps_other(self) -> None:
         first, first_chat = self.service.resolve_chat("test", "bot", "group", "room-1")
         _second, second_chat = self.service.resolve_chat("test", "bot", "private", "friend-1")
