@@ -12,6 +12,7 @@ from typing import Any, Protocol
 
 from openai import AsyncOpenAI
 
+from .errors import ContextOverflowError, is_context_overflow, parse_context_limit
 from .messages import Message, ToolCall
 
 
@@ -137,48 +138,57 @@ class LLMClient:
             kwargs["reasoning_effort"] = self.reasoning_effort
 
         try:
-            stream = await self._client.chat.completions.create(**kwargs)
+            try:
+                stream = await self._client.chat.completions.create(**kwargs)
+            except Exception as exc:
+                if "stream_options" not in str(exc).casefold():
+                    raise
+                kwargs.pop("stream_options")
+                stream = await self._client.chat.completions.create(**kwargs)
+
+            content_parts: list[str] = []
+            tool_calls: dict[int, ToolCall] = {}
+            finish_reason: str | None = None
+            usage = Usage()
+
+            async for chunk in stream:
+                if getattr(chunk, "usage", None):
+                    u = chunk.usage
+                    if u.prompt_tokens:
+                        usage.prompt_tokens += u.prompt_tokens
+                    if u.completion_tokens:
+                        usage.completion_tokens += u.completion_tokens
+                    if u.total_tokens:
+                        usage.total_tokens += u.total_tokens
+                if not chunk.choices:
+                    continue
+                choice = chunk.choices[0]
+                delta = choice.delta
+                if getattr(delta, "content", None):
+                    content_parts.append(delta.content)
+                for tc in getattr(delta, "tool_calls", None) or []:
+                    idx = tc.index
+                    if idx not in tool_calls:
+                        tool_calls[idx] = ToolCall(
+                            id=tc.id or "", name="", arguments={}
+                        )
+                    if tc.id:
+                        tool_calls[idx].id = tc.id
+                    fn = getattr(tc, "function", None)
+                    if fn:
+                        if fn.name:
+                            tool_calls[idx].name = fn.name
+                        if fn.arguments:
+                            # 流式 arguments 分片，需要累积再解析
+                            _merge_args(tool_calls[idx], fn.arguments)
+                if choice.finish_reason:
+                    finish_reason = choice.finish_reason
         except Exception as exc:
-            if "stream_options" not in str(exc).casefold():
-                raise
-            kwargs.pop("stream_options")
-            stream = await self._client.chat.completions.create(**kwargs)
-
-        content_parts: list[str] = []
-        tool_calls: dict[int, ToolCall] = {}
-        finish_reason: str | None = None
-        usage = Usage()
-
-        async for chunk in stream:
-            if getattr(chunk, "usage", None):
-                u = chunk.usage
-                if u.prompt_tokens:
-                    usage.prompt_tokens += u.prompt_tokens
-                if u.completion_tokens:
-                    usage.completion_tokens += u.completion_tokens
-                if u.total_tokens:
-                    usage.total_tokens += u.total_tokens
-            if not chunk.choices:
-                continue
-            choice = chunk.choices[0]
-            delta = choice.delta
-            if getattr(delta, "content", None):
-                content_parts.append(delta.content)
-            for tc in getattr(delta, "tool_calls", None) or []:
-                idx = tc.index
-                if idx not in tool_calls:
-                    tool_calls[idx] = ToolCall(id=tc.id or "", name="", arguments={})
-                if tc.id:
-                    tool_calls[idx].id = tc.id
-                fn = getattr(tc, "function", None)
-                if fn:
-                    if fn.name:
-                        tool_calls[idx].name = fn.name
-                    if fn.arguments:
-                        # 流式 arguments 分片，需要累积再解析
-                        _merge_args(tool_calls[idx], fn.arguments)
-            if choice.finish_reason:
-                finish_reason = choice.finish_reason
+            if is_context_overflow(exc):
+                raise ContextOverflowError(
+                    str(exc), limit=parse_context_limit(exc)
+                ) from exc
+            raise
 
         # 排序按 index
         ordered = [tool_calls[i] for i in sorted(tool_calls)]

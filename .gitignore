@@ -148,3 +148,5 @@ dmypy.json
 .vscode/
 webui/node_modules/
 webui/dist/
+
+.workbuddy/

@@ -1144,6 +1144,9 @@ class BridgeService:
         if agent is not None:
             agent.update_permissions(permissions)
             agent.update_tools(tools)
+            agent.apply_context_limit(
+                int(runtime_config.get("max_context") or self.config.max_context)
+            )
             return agent
 
         async def ask_callback(question: str) -> bool:
@@ -1918,6 +1921,7 @@ class BridgeService:
                     account, incoming, result.text, agent._llm
                 )
             if result.status == "error":
+                self.state.log(f"{key} 处理失败：{result.error or 'unknown'}")
                 return "处理消息时发生错误。"
             if result.text.strip() == "[SILENT]":
                 return ""
