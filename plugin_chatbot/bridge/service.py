@@ -568,6 +568,8 @@ class BridgeService:
             "base_url": (provider or {}).get("base_url") or "",
             "api_key": (provider or {}).get("api_key") or "",
             "reasoning_effort": account.get("reasoning_effort") or "",
+            "temperature_enabled": bool(account.get("temperature_enabled", True)),
+            "temperature": account.get("temperature", 0.7),
             "system_prompt": self._account_persona(account),
             "cost_limit": account.get("cost_limit"),
             "max_context": positive_context_length(
@@ -1216,6 +1218,11 @@ class BridgeService:
                 runtime_config.get("max_context") or self.config.max_context
             ),
             compact_rate=self.config.compact_rate,
+            temperature=(
+                float(runtime_config.get("temperature", 0.7))
+                if runtime_config.get("temperature_enabled", True)
+                else None
+            ),
             reasoning_effort=str(runtime_config.get("reasoning_effort") or "") or None,
             project_memory_tools_enabled=False,
             allow_environment_fallback=False,
@@ -1594,6 +1601,11 @@ class BridgeService:
             autosave=False,
             max_context=self.config.max_context,
             compact_rate=self.config.compact_rate,
+            temperature=(
+                float(runtime_config.get("temperature", 0.7))
+                if runtime_config.get("temperature_enabled", True)
+                else None
+            ),
             reasoning_effort=str(runtime_config.get("reasoning_effort") or "") or None,
             project_memory_enabled=False,
             allow_environment_fallback=False,
@@ -1922,7 +1934,7 @@ class BridgeService:
                 )
             if result.status == "error":
                 self.state.log(f"{key} 处理失败：{result.error or 'unknown'}")
-                return "处理消息时发生错误。"
+                return ""
             if result.text.strip() == "[SILENT]":
                 return ""
             problem = audit_reply(result.text)

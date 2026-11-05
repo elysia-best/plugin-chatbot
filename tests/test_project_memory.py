@@ -175,7 +175,7 @@ class ProjectMemoryTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual("", client.model)
             self.assertIsNone(client.reasoning_effort)
             create_client.assert_called_once_with(
-                base_url=None, api_key="EMPTY", timeout=120.0
+                base_url=None, api_key="EMPTY", timeout=120.0, max_retries=0
             )
 
             with tempfile.TemporaryDirectory() as temp:
@@ -222,6 +222,48 @@ class ProjectMemoryTests(unittest.IsolatedAsyncioTestCase):
         with patch.dict(os.environ, {"OPENAI_REASONING_EFFORT": ""}):
             await no_effort_client.complete([Message(role="user", content="hello")])
         self.assertNotIn("reasoning_effort", no_effort_api.kwargs)
+
+    async def test_llm_client_omits_temperature_when_disabled(self) -> None:
+        class FakeCompletions:
+            def __init__(self) -> None:
+                self.kwargs = {}
+
+            async def create(self, **kwargs):
+                self.kwargs = kwargs
+
+                async def stream():
+                    yield SimpleNamespace(usage=None, choices=[])
+
+                return stream()
+
+        api = FakeCompletions()
+        client = LLMClient(model="test", temperature=None)
+        client._client = SimpleNamespace(chat=SimpleNamespace(completions=api))
+
+        await client.complete([Message(role="user", content="hello")])
+
+        self.assertNotIn("temperature", api.kwargs)
+
+    async def test_llm_client_sends_configured_temperature(self) -> None:
+        class FakeCompletions:
+            def __init__(self) -> None:
+                self.kwargs = {}
+
+            async def create(self, **kwargs):
+                self.kwargs = kwargs
+
+                async def stream():
+                    yield SimpleNamespace(usage=None, choices=[])
+
+                return stream()
+
+        api = FakeCompletions()
+        client = LLMClient(model="test", temperature=1.0)
+        client._client = SimpleNamespace(chat=SimpleNamespace(completions=api))
+
+        await client.complete([Message(role="user", content="hello")])
+
+        self.assertEqual(1.0, api.kwargs["temperature"])
 
     async def test_llm_client_falls_back_when_stream_usage_is_unsupported(self) -> None:
         class UsageUnsupportedCompletions:

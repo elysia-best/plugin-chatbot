@@ -5,6 +5,8 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from agent import Agent, LLMResponse, Message, ToolCall, Usage
 from agent.context import estimate_message_tokens
@@ -61,6 +63,54 @@ class AlwaysOverflowLLM:
         raise RuntimeError("context_length_exceeded: prompt is too long")
 
 
+class BodyOnlyServiceUnavailable(RuntimeError):
+    def __init__(self) -> None:
+        super().__init__("upstream request failed")
+        self.body = {"error": {"message": "Service temporarily unavailable"}}
+
+
+class TemporaryEngineFailureLLM:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def complete(self, messages, tools=None, system_prompt=None):
+        self.calls += 1
+        if self.calls == 1:
+            raise RuntimeError("Error code: 500 - engine is not available temporarily")
+        return LLMResponse(content="recovered")
+
+
+class BodyOnlyServiceUnavailableLLM:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def complete(self, messages, tools=None, system_prompt=None):
+        self.calls += 1
+        if self.calls == 1:
+            raise BodyOnlyServiceUnavailable()
+        return LLMResponse(content="recovered from 503")
+
+
+class RateLimitLLM:
+    def __init__(self, succeed_after: int, retry_after: str | None = None) -> None:
+        self.succeed_after = succeed_after
+        self.retry_after = retry_after
+        self.calls = 0
+
+    async def complete(self, messages, tools=None, system_prompt=None):
+        self.calls += 1
+        if self.calls < self.succeed_after:
+            exc = RuntimeError(
+                "Error code: 429 - inference exceeds tpm/rpm limit"
+            )
+            exc.status_code = 429
+            exc.response = SimpleNamespace(
+                headers={"retry-after": self.retry_after} if self.retry_after else {}
+            )
+            raise exc
+        return LLMResponse(content="rate limit recovered")
+
+
 class FailingSummaryLLM:
     def __init__(self) -> None:
         self.summary_calls = 0
@@ -84,6 +134,64 @@ def _turns(count: int, prefix: str = "question") -> list[Message]:
 
 
 class ContextCompactionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_temporarily_unavailable_engine_is_retried(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            agent = Agent(model="test", workspace=temp)
+            llm = TemporaryEngineFailureLLM()
+            agent._llm = llm
+
+            result = await agent.run("hello")
+
+            self.assertEqual("completed", result.status)
+            self.assertEqual("recovered", result.text)
+            self.assertEqual(2, llm.calls)
+
+    async def test_service_unavailable_in_error_body_is_retried(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            agent = Agent(model="test", workspace=temp)
+            llm = BodyOnlyServiceUnavailableLLM()
+            agent._llm = llm
+
+            result = await agent.run("hello")
+
+            self.assertEqual("completed", result.status)
+            self.assertEqual("recovered from 503", result.text)
+            self.assertEqual(2, llm.calls)
+
+    async def test_tpm_rpm_rate_limit_retries_with_backoff(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            agent = Agent(model="test", workspace=temp)
+            llm = RateLimitLLM(succeed_after=3)
+            agent._llm = llm
+            delays = []
+
+            async def capture_delay(seconds: float) -> None:
+                delays.append(seconds)
+
+            with patch("agent.core.asyncio.sleep", side_effect=capture_delay):
+                result = await agent.run("hello")
+
+            self.assertEqual("completed", result.status)
+            self.assertEqual("rate limit recovered", result.text)
+            self.assertEqual(3, llm.calls)
+            self.assertEqual([2.0, 4.0], delays)
+
+    async def test_rate_limit_respects_retry_after_header(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            agent = Agent(model="test", workspace=temp)
+            llm = RateLimitLLM(succeed_after=2, retry_after="3")
+            agent._llm = llm
+            delays = []
+
+            async def capture_delay(seconds: float) -> None:
+                delays.append(seconds)
+
+            with patch("agent.core.asyncio.sleep", side_effect=capture_delay):
+                result = await agent.run("hello")
+
+            self.assertEqual("completed", result.status)
+            self.assertEqual([3.0], delays)
+
     async def test_run_persists_provider_reported_prompt_usage(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             agent = Agent(model="test", workspace=temp)

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
+import math
 import secrets
 import time
 from pathlib import Path
@@ -363,6 +364,8 @@ async def _handle_message(bot: Bot, event: Event) -> None:  # noqa: C901
                 "provider_id": "",
                 "model": "",
                 "reasoning_effort": "",
+                "temperature_enabled": True,
+                "temperature": 0.7,
                 "context_length": None,
                 "persona_role": None,
                 "persona_prompt": "",
@@ -465,6 +468,16 @@ def _memory_interval(value: Any) -> int:
         raise HTTPException(status_code=422, detail="Invalid memory interval") from None
 
 
+def _temperature_value(value: Any) -> float:
+    try:
+        temperature = float(value)
+    except (TypeError, ValueError, OverflowError):
+        raise HTTPException(status_code=422, detail="Invalid temperature") from None
+    if not math.isfinite(temperature) or not 0 <= temperature <= 2:
+        raise HTTPException(status_code=422, detail="Temperature must be between 0 and 2")
+    return temperature
+
+
 @_api.get("/api/accounts", dependencies=[Depends(_authorize)])
 async def _accounts() -> list[dict[str, Any]]:
     return _service.state.data["accounts"]
@@ -488,8 +501,11 @@ async def _create_account(body: dict[str, Any]) -> dict[str, Any]:
         "enabled": bool(body.get("enabled", True)),
         "provider_id": str(body.get("provider_id") or ""),
         "model": str(body.get("model") or ""),
-        "reasoning_effort": str(body.get("reasoning_effort") or ""),
+        "reasoning_effort": str(body.get("reasoning_effort") or "medium"),
+        "temperature_enabled": bool(body.get("temperature_enabled", True)),
+        "temperature": _temperature_value(body.get("temperature", 0.7)),
         "context_length": positive_context_length(body.get("context_length")),
+
         "persona_role": str(body.get("persona_role") or "") or None,
         "persona_prompt": str(body.get("persona_prompt") or ""),
         "enabled_tools": body.get("enabled_tools")
@@ -523,6 +539,7 @@ async def _update_account(row_id: str, body: dict[str, Any]) -> dict[str, Any]:
         "provider_id",
         "model",
         "reasoning_effort",
+        "temperature_enabled",
         "context_length",
         "persona_role",
         "persona_prompt",
@@ -533,6 +550,8 @@ async def _update_account(row_id: str, body: dict[str, Any]) -> dict[str, Any]:
     ):
         if key in body:
             row[key] = body[key]
+    if "temperature" in body:
+        row["temperature"] = _temperature_value(body["temperature"])
     if "memory_interval" in body:
         row["memory_interval"] = _memory_interval(body["memory_interval"])
     if "memory_enabled" in body:

@@ -15,6 +15,8 @@ from openai import AsyncOpenAI
 from .errors import ContextOverflowError, is_context_overflow, parse_context_limit
 from .messages import Message, ToolCall
 
+MAX_IMAGES_PER_REQUEST = 50
+
 
 class LLMBackend(Protocol):
     """LLM 后端接口，便于注入 mock 或自定义实现。
@@ -62,7 +64,7 @@ class LLMClient:
         model: str | None = None,
         base_url: str | None = None,
         api_key: str | None = None,
-        temperature: float = 0.7,
+        temperature: float | None = 0.7,
         max_tokens: int | None = None,
         reasoning_effort: str | None = None,
         timeout: float = 120.0,
@@ -93,7 +95,7 @@ class LLMClient:
         self.reasoning_effort = effort.strip() or None
         # client 参数便于测试注入 mock
         self._client = client or AsyncOpenAI(
-            base_url=base, api_key=key, timeout=timeout
+            base_url=base, api_key=key, timeout=timeout, max_retries=0
         )
 
     def _tool_schemas(self, tools: list[Any]) -> list[dict[str, Any]]:
@@ -122,14 +124,16 @@ class LLMClient:
         if system_prompt:
             payload_messages.append({"role": "system", "content": system_prompt})
         payload_messages.extend(m.to_openai() for m in messages)
+        _limit_request_images(payload_messages)
 
         kwargs: dict[str, Any] = {
             "model": self.model,
             "messages": payload_messages,
             "stream": True,
-            "temperature": self.temperature,
             "stream_options": {"include_usage": True},
         }
+        if self.temperature is not None:
+            kwargs["temperature"] = self.temperature
         if tools:
             kwargs["tools"] = self._tool_schemas(tools)
         if self.max_tokens:
@@ -213,3 +217,29 @@ def _merge_args(tc: ToolCall, fragment: str) -> None:
             tc.arguments = parsed
     except json.JSONDecodeError:
         pass
+
+
+def _limit_request_images(messages: list[dict[str, Any]]) -> None:
+    """Keep the newest images within provider limits without mutating history."""
+    image_locations: list[tuple[int, int]] = []
+    for message_index, message in enumerate(messages):
+        content = message.get("content")
+        if isinstance(content, list):
+            image_locations.extend(
+                (message_index, block_index)
+                for block_index, block in enumerate(content)
+                if isinstance(block, dict)
+                and block.get("type") in {"image_url", "input_image"}
+            )
+
+    excess = len(image_locations) - MAX_IMAGES_PER_REQUEST
+    if excess <= 0:
+        return
+    to_remove: dict[int, set[int]] = {}
+    for message_index, block_index in image_locations[:excess]:
+        to_remove.setdefault(message_index, set()).add(block_index)
+    for message_index, indexes in to_remove.items():
+        content = messages[message_index]["content"]
+        messages[message_index]["content"] = [
+            block for index, block in enumerate(content) if index not in indexes
+        ]

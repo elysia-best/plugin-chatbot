@@ -72,6 +72,43 @@ async def test_text_stream():
     check("text_finish", resp.finish_reason == "stop")
 
 
+async def test_request_limits_images_without_mutating_history():
+    captured = {}
+
+    async def handler(request):
+        captured.update(json.loads(request.content))
+        body = b"".join(
+            f"data: {json.dumps(c)}\n\n".encode()
+            for c in [make_chunk(content="ok"), make_chunk(finish="stop")]
+        )
+        return httpx2.Response(
+            200, content=body, headers={"Content-Type": "text/event-stream"}
+        )
+
+    content = [
+        {"type": "text", "text": "many images"},
+        *[
+            {"type": "image_url", "image_url": {"url": f"https://example.test/{i}.png"}}
+            for i in range(51)
+        ],
+    ]
+    message = Message(role="user", content=content)
+    transport = httpx2.MockTransport(handler)
+    http_client = httpx2.AsyncClient(transport=transport)
+    client = LLMClient(model="m", base_url="http://test", api_key="k", client=None)
+    client._client = AsyncOpenAI(
+        base_url="http://test", api_key="k", http_client=http_client
+    )
+
+    await client.complete([message])
+
+    sent_content = captured["messages"][0]["content"]
+    sent_images = [block for block in sent_content if block.get("type") == "image_url"]
+    check("request_image_limit", len(sent_images) == 50)
+    check("request_keeps_newest_images", sent_images[-1]["image_url"]["url"].endswith("50.png"))
+    check("history_images_unchanged", sum(block.get("type") == "image_url" for block in message.content) == 51)
+
+
 async def test_tool_call_stream():
     # 分片 tool_calls
     chunks = [
@@ -111,6 +148,7 @@ async def test_tool_call_stream():
 
 async def main():
     await test_text_stream()
+    await test_request_limits_images_without_mutating_history()
     await test_tool_call_stream()
     print(f"\n{PASS} passed, {FAIL} failed")
     return 0 if FAIL == 0 else 1

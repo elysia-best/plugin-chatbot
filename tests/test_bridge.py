@@ -381,6 +381,28 @@ class BridgeServiceTests(unittest.TestCase):
         self.assertEqual("https://provider.example/v1", config["base_url"])
         self.assertEqual(64_000, config["max_context"])
 
+    def test_bot_temperature_configuration_is_inherited_by_groups(self) -> None:
+        self.service.state.data["accounts"] = [
+            {
+                "id": "a1",
+                "platform": "onebot",
+                "bot_id": "100",
+                "temperature_enabled": False,
+                "temperature": 1.0,
+            }
+        ]
+        private_config = self.service.effective_chat_config(
+            "onebot", "100", "private", "user"
+        )
+        group_config = self.service.effective_chat_config(
+            "onebot", "100", "group", "room"
+        )
+
+        self.assertFalse(private_config["temperature_enabled"])
+        self.assertEqual(1.0, private_config["temperature"])
+        self.assertFalse(group_config["temperature_enabled"])
+        self.assertEqual(1.0, group_config["temperature"])
+
     def test_account_provider_supplies_runtime_connection_and_model(self) -> None:
         self.service.state.data["accounts"] = [
             {
@@ -551,6 +573,42 @@ class BridgeServiceTests(unittest.TestCase):
             self.service.set_mode(mode)
             prompt = self.service._agent(key, chat_id, owner=False)._build_system_prompt()
             self.assertIn("始终以小西琳的人格回答", prompt)
+
+    def test_agent_error_is_logged_without_sending_reply(self) -> None:
+        async def run_test() -> None:
+            usage = SimpleNamespace(prompt_tokens=0, completion_tokens=0, total_tokens=0)
+            result = SimpleNamespace(
+                status="error",
+                text="",
+                error="Error code: 503 - Service temporarily unavailable",
+                usage=usage,
+                tool_calls=[],
+            )
+            agent = SimpleNamespace(run=AsyncMock(return_value=result))
+            self.service._agent = cast("Any", lambda *_args, **_kwargs: agent)
+            incoming = IncomingMessage(
+                bot=None,
+                platform="test",
+                bot_id="bot",
+                kind="group",
+                peer_id="room-1",
+                user_id="member",
+                user_name="Member",
+                text="hello",
+                target=Target("room-1"),
+            )
+
+            self.assertEqual("", await self.service._process_message(incoming))
+            self.assertTrue(
+                any(
+                    "处理失败：Error code: 503 - Service temporarily unavailable"
+                    in entry.get("text", "")
+                    for entry in self.service.state.data["activity"]
+                )
+            )
+            agent.run.assert_awaited_once()
+
+        asyncio.run(run_test())
 
     def test_chat_mode_suppresses_silent_marker(self) -> None:
         async def run_test() -> None:
