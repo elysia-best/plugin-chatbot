@@ -2013,6 +2013,10 @@ class BridgeService:
     ) -> str:
         """Buffer skipped messages and deliver them together on the next reply.
 
+        Delivery consumes the buffer: queued rows are removed from persistence
+        before the model runs, so a failed, rejected, or short-circuited turn
+        never re-delivers messages the model has already been given.
+
         Args:
             incoming: One raw group message.
             probability: Configured reply probability in [0, 1).
@@ -2023,19 +2027,16 @@ class BridgeService:
         key = conversation_key(
             incoming.platform, incoming.bot_id, incoming.kind, incoming.peer_id
         )
-        owner = self.is_admin(
-            incoming.user_id, None, incoming.platform, incoming.bot_id
-        )
+        record = self.state.data["conversations"].get(key)
+        if record and record.get("status") == "rejected":
+            self._clear_pending(key)
+            return ""
         stamp = (
             datetime.fromtimestamp(time.time())
             .astimezone()
             .strftime(PENDING_TIMESTAMP_FORMAT)
         )
         pending = self._pending_rows(key)
-        if incoming.event_id and any(
-            row.get("event_id") == incoming.event_id for row in pending
-        ):
-            return ""
         pending.append(
             {
                 "at": stamp,
@@ -2049,9 +2050,10 @@ class BridgeService:
         ):
             del pending[:-PENDING_RECENT_LIMIT]
         self.state.save()
-        if not (probability > 0.0 and (owner or random.random() < probability)):
+        if not (probability > 0.0 and random.random() < probability):
             return ""
         rows = list(pending)
+        self._clear_pending(key)
         content: list[dict[str, Any]] = [
             {"type": "text", "text": timestamped_lines(rows)}
         ]
@@ -2077,9 +2079,19 @@ class BridgeService:
             group_member_is_admin=incoming.group_member_is_admin,
             mentions_bot=incoming.mentions_bot,
         )
-        return await self._process_message(merged, pending_key=key)
+        return await self._process_message(merged)
 
     async def handle_message(self, incoming: IncomingMessage) -> str:
+        now = time.time()
+        self.seen_events = {
+            event_id: stamp
+            for event_id, stamp in self.seen_events.items()
+            if now - stamp < EVENT_TTL_SECONDS
+        }
+        if incoming.event_id and incoming.event_id in self.seen_events:
+            return ""
+        if incoming.event_id:
+            self.seen_events[incoming.event_id] = now
         if incoming.kind == "group" and not incoming.text.startswith("/"):
             probability = self.reply_probability(incoming)
             if probability < DEFAULT_REPLY_PROBABILITY:
@@ -2102,7 +2114,7 @@ class BridgeService:
             )
         return await future
 
-    async def _flush_group_batch(self, key: str) -> None:  # noqa: C901
+    async def _flush_group_batch(self, key: str) -> None:
         await asyncio.sleep(max(0.0, min(self.config.group_batch_seconds, 10.0)))
         queued = self.group_batches.pop(key, [])
         if not queued:
@@ -2111,15 +2123,6 @@ class BridgeService:
             self.group_batch_tasks.pop(key, None)
         messages = [incoming for incoming, _future in queued]
         first = messages[0]
-        now = time.time()
-        self.seen_events = {
-            event_id: stamp
-            for event_id, stamp in self.seen_events.items()
-            if now - stamp < EVENT_TTL_SECONDS
-        }
-        for item in messages[1:]:
-            if item.event_id:
-                self.seen_events[item.event_id] = now
         chunks: list[dict[str, Any]] = []
         for item in messages:
             chunks.append({"type": "text", "text": formatted_message_text(item)})
@@ -2154,7 +2157,7 @@ class BridgeService:
                 future.set_result(response if index == 0 else "")
 
     async def _process_message(  # noqa: C901, PLR0911, PLR0912, PLR0915
-        self, incoming: IncomingMessage, *, pending_key: str | None = None
+        self, incoming: IncomingMessage
     ) -> str:
         account = self.account_config(incoming.platform, incoming.bot_id)
         if account is not None and not bool(account.get("enabled", True)):
@@ -2174,13 +2177,6 @@ class BridgeService:
             incoming.bot_id,
         )
         now = time.time()
-        self.seen_events = {
-            k: v for k, v in self.seen_events.items() if now - v < EVENT_TTL_SECONDS
-        }
-        if incoming.event_id and incoming.event_id in self.seen_events:
-            return ""
-        if incoming.event_id:
-            self.seen_events[incoming.event_id] = now
         key, chat_id = self.resolve_chat(
             incoming.platform, incoming.bot_id, incoming.kind, incoming.peer_id
         )
@@ -2311,8 +2307,6 @@ class BridgeService:
             if result.status == "error":
                 self.state.log(f"{key} 处理失败：{result.error or 'unknown'}")
                 return ""
-            if pending_key is not None:
-                self._clear_pending(pending_key)
             if result.text.strip() == "[SILENT]":
                 return ""
             problem = audit_reply(result.text)

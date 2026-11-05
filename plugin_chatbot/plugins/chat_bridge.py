@@ -1120,6 +1120,9 @@ async def _reset_chat(conversation_key: str) -> dict[str, bool]:
         cleared = bool(messages)
         _service.store.replace(record["chat_id"], [])
         _service.agents.pop(conversation_key, None)
+        pending = _service.state.data["pending_messages"].pop(conversation_key, None)
+        if pending is not None:
+            _service.state.save()
     return {"reset": True, "cleared": cleared}
 
 

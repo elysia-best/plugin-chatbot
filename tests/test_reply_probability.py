@@ -172,17 +172,20 @@ class ProbabilityReplyTests(unittest.TestCase):
             self.assertIn(expected, line)
         self.assertEqual({}, self.service.state.data["pending_messages"])
 
-    def test_owner_replies_and_flushes_buffer_when_probability_is_positive(
-        self,
-    ) -> None:
+    def test_administrator_has_no_probability_exemption(self) -> None:
         self._set_probability(0.5)
         with patch("plugin_chatbot.bridge.service.random.random", return_value=0.9):
-            self._handle(_incoming("第一条"))
-            self._handle(_incoming("请回复", user_id="owner"))
+            self._handle(_incoming("管理员未命中", user_id="owner"))
+
+        self.assertEqual([], self.agent.prompts)
+        self.assertEqual(1, len(self.service.state.data["pending_messages"][self.key]))
+
+        with patch("plugin_chatbot.bridge.service.random.random", return_value=0.1):
+            self._handle(_incoming("普通成员命中"))
 
         text = self._prompt_text()
-        self.assertIn("第一条", text)
-        self.assertIn("请回复", text)
+        self.assertIn("管理员未命中", text)
+        self.assertIn("普通成员命中", text)
         self.assertEqual({}, self.service.state.data["pending_messages"])
 
     def test_probability_zero_buffers_even_administrator_messages(self) -> None:
@@ -221,7 +224,7 @@ class ProbabilityReplyTests(unittest.TestCase):
         self.assertIn(image, prompt)
         self.assertIn("看图", str(prompt[0]["text"]))
 
-    def test_failed_model_run_keeps_buffered_messages(self) -> None:
+    def test_failed_model_run_does_not_rebuffer_messages(self) -> None:
         self._set_probability(0.5)
 
         class FailingAgent(_RecordingAgent):
@@ -236,11 +239,56 @@ class ProbabilityReplyTests(unittest.TestCase):
                     error="model unavailable",
                 )
 
-        with patch.object(self.service, "_agent", return_value=FailingAgent()):
+        failing = FailingAgent()
+        with patch.object(self.service, "_agent", return_value=failing):
             with patch("plugin_chatbot.bridge.service.random.random", return_value=0.1):
-                asyncio.run(self.service.handle_message(_incoming("保留我")))
+                asyncio.run(self.service.handle_message(_incoming("已投递")))
+                asyncio.run(self.service.handle_message(_incoming("下一轮")))
 
+        self.assertEqual({}, self.service.state.data["pending_messages"])
+        self.assertEqual(2, len(failing.prompts))
+        for prompt in failing.prompts:
+            first = prompt[0]["text"] if isinstance(prompt, list) else prompt
+            self.assertEqual(1, len(first.splitlines()))
+
+    def test_consecutive_hits_never_redeliver_earlier_messages(self) -> None:
+        self._set_probability(0.5)
+        with patch("plugin_chatbot.bridge.service.random.random", return_value=0.1):
+            for text in ("第一条", "第二条", "第三条"):
+                self._handle(_incoming(text))
+
+        self.assertEqual(3, len(self.agent.prompts))
+        for prompt, own in zip(
+            self.agent.prompts, ("第一条", "第二条", "第三条")
+        ):
+            block = prompt[0]["text"] if isinstance(prompt, list) else prompt
+            lines = block.splitlines()
+            self.assertEqual(1, len(lines))
+            self.assertIn(own, lines[0])
+
+    def test_duplicate_event_after_flush_is_not_rebuffered(self) -> None:
+        self._set_probability(0.5)
+        incoming = _incoming("只处理一次")
+        incoming.event_id = "evt-flush"
+        with patch("plugin_chatbot.bridge.service.random.random", return_value=0.1):
+            self._handle(incoming)
+            self._handle(incoming)
+
+        self.assertEqual(1, len(self.agent.prompts))
+        self.assertEqual({}, self.service.state.data["pending_messages"])
+
+    def test_rejected_conversation_clears_buffer(self) -> None:
+        self._set_probability(0.0)
+        self._handle(_incoming("停止前"))
         self.assertEqual(1, len(self.service.state.data["pending_messages"][self.key]))
+
+        self.service.state.data["conversations"][self.key]["status"] = "rejected"
+        self._set_probability(0.5)
+        with patch("plugin_chatbot.bridge.service.random.random", return_value=0.1):
+            self._handle(_incoming("停止中"))
+
+        self.assertEqual({}, self.service.state.data["pending_messages"])
+        self.assertEqual([], self.agent.prompts)
 
     def test_chat_status_reports_probability_instead_of_silent(self) -> None:
         self._set_probability(0.25)
