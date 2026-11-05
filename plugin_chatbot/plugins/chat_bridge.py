@@ -26,6 +26,12 @@ from plugin_chatbot.bridge.memes import (
     image_mimetype,
     normalize_keywords,
 )
+from plugin_chatbot.bridge.mentions import (
+    collect_targets,
+    inbound_message,
+    resolve_names,
+    segment_text,
+)
 from plugin_chatbot.bridge.service import (
     DEFAULT_REPLY_PROBABILITY,
     IncomingMessage,
@@ -125,20 +131,6 @@ _service = BridgeService(
 _message = on_message(priority=20, block=False)
 
 
-def _segment_text(segment: Any, bot_id: str) -> str:
-    kind = str(getattr(segment, "type", ""))
-    data = getattr(segment, "data", {})
-    if kind == "text":
-        return str(data.get("text", ""))
-    if kind in {"at", "mention_user"}:
-        target_id = str(data.get("qq") or data.get("user_id") or "")
-        target_name = str(data.get("username") or "").strip()
-        if target_id == bot_id or bool(data.get("is_bot")):
-            return "@我"
-        return f"@{target_name or target_id}"
-    return ""
-
-
 def _media_kind(kind: str) -> str:
     if kind in {"audio", "voice", "record"}:
         return "audio"
@@ -182,7 +174,12 @@ async def _image_content(
 
 
 async def _message_content(
-    message: Any, event: Event, bot: Bot
+    message: Any,
+    event: Event,
+    bot: Bot,
+    *,
+    kind: str = "",
+    peer_id: str = "",
 ) -> tuple[str, list[dict[str, Any]]]:
     try:
         unified = UniMessage.of(message, bot=bot)
@@ -192,20 +189,29 @@ async def _message_content(
         fallback = str(message).strip()
         return fallback, []
 
+    segments = list(unified)
     text_parts: list[str] = []
     image_segments: list[Any] = []
     media_types: set[str] = set()
     emoji_count = 0
     bot_id = str(getattr(bot, "self_id", ""))
-    for segment in unified:
-        kind = str(getattr(segment, "type", ""))
-        if kind in {"text", "at", "mention_user"}:
-            text_parts.append(_segment_text(segment, bot_id))
-        elif kind in {"face", "emoji"}:
+    names = await resolve_names(bot, kind, peer_id, collect_targets(segments, bot_id))
+    for segment in segments:
+        segment_type = str(getattr(segment, "type", ""))
+        if segment_type in {
+            "text",
+            "at",
+            "mention_user",
+            "atall",
+            "mention_everyone",
+            "group_mention_user",
+        }:
+            text_parts.append(segment_text(segment, bot_id, names))
+        elif segment_type in {"face", "emoji"}:
             emoji_count += 1
-        elif kind == "image" or isinstance(segment, Image):
+        elif segment_type == "image" or isinstance(segment, Image):
             image_segments.append(segment)
-        elif media_kind := _media_kind(kind):
+        elif media_kind := _media_kind(segment_type):
             media_types.add(media_kind)
     plain = "".join(text_parts).strip()
     placeholders = [
@@ -233,9 +239,7 @@ def _field_value(source: Any, key: str) -> Any:
     return getattr(source, key, None)
 
 
-def _message_role_and_mentions(
-    event: Event, bot: Bot, kind: str
-) -> tuple[bool, bool]:
+def _message_role_and_mentions(event: Event, bot: Bot, kind: str) -> tuple[bool, bool]:
     author = _field_value(event, "author")
     sender = _field_value(event, "sender")
     role = str(
@@ -398,13 +402,13 @@ async def _handle_message(bot: Bot, event: Event) -> None:  # noqa: C901
     kind = "private" if target.private else "group"
     peer_id = target.id if kind == "private" else (target.parent_id or target.id)
     user_name = _user_name(event, user_id)
-    group_member_is_admin, mentions_bot = _message_role_and_mentions(
-        event, bot, kind
-    )
+    group_member_is_admin, mentions_bot = _message_role_and_mentions(event, bot, kind)
     event_id_method = getattr(event, "get_message_id", None)
     event_id = str(event_id_method() if callable(event_id_method) else "")
-    message = event.get_message()
-    text, content = await _message_content(message, event, bot)
+    message = inbound_message(event, str(getattr(bot, "self_id", "")))
+    text, content = await _message_content(
+        message, event, bot, kind=kind, peer_id=peer_id
+    )
     normalized_text = " ".join(text.split())
     preview = normalized_text[:MESSAGE_LOG_PREVIEW_CHARS]
     event_type = getattr(getattr(event, "__type__", None), "value", None)
@@ -612,7 +616,6 @@ async def _create_account(body: dict[str, Any]) -> dict[str, Any]:
         "temperature_enabled": bool(body.get("temperature_enabled", True)),
         "temperature": _temperature_value(body.get("temperature", 0.7)),
         "context_length": positive_context_length(body.get("context_length")),
-
         "persona_role": str(body.get("persona_role") or "") or None,
         "persona_prompt": str(body.get("persona_prompt") or ""),
         "enabled_tools": body.get("enabled_tools")
@@ -941,7 +944,8 @@ async def _update_account_access(  # noqa: C901, PLR0912
     account.update(validated)
     for record in _service.state.data["conversations"].values():
         if (record.get("platform"), record.get("bot_id")) != (
-            account.get("platform"), account.get("bot_id")
+            account.get("platform"),
+            account.get("bot_id"),
         ):
             continue
         listed = _service.is_allowed(
@@ -1371,9 +1375,7 @@ async def _bot_memories(row_id: str) -> list[dict[str, Any]]:
     return _service.bot_memory_store(account).list()
 
 
-@_api.get(
-    "/api/accounts/{row_id}/memories/{name}", dependencies=[Depends(_authorize)]
-)
+@_api.get("/api/accounts/{row_id}/memories/{name}", dependencies=[Depends(_authorize)])
 async def _get_bot_memory(row_id: str, name: str) -> dict[str, Any]:
     account = _find_row(_service.state.data["accounts"], row_id)
     if account is None:
@@ -1386,12 +1388,8 @@ async def _get_bot_memory(row_id: str, name: str) -> dict[str, Any]:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
-@_api.post(
-    "/api/accounts/{row_id}/memories", dependencies=[Depends(_authorize)]
-)
-async def _create_bot_memory(
-    row_id: str, body: ProjectMemoryRequest
-) -> dict[str, str]:
+@_api.post("/api/accounts/{row_id}/memories", dependencies=[Depends(_authorize)])
+async def _create_bot_memory(row_id: str, body: ProjectMemoryRequest) -> dict[str, str]:
     account = _find_row(_service.state.data["accounts"], row_id)
     if account is None:
         raise HTTPException(status_code=404, detail="Account not found")
@@ -1412,9 +1410,7 @@ async def _create_bot_memory(
     return {"name": body.name}
 
 
-@_api.put(
-    "/api/accounts/{row_id}/memories/{name}", dependencies=[Depends(_authorize)]
-)
+@_api.put("/api/accounts/{row_id}/memories/{name}", dependencies=[Depends(_authorize)])
 async def _update_bot_memory(
     row_id: str, name: str, body: ProjectMemoryRequest
 ) -> dict[str, str]:
@@ -1525,9 +1521,7 @@ async def _approve_memory_candidate(
     return {"name": name}
 
 
-@_api.delete(
-    "/api/memory-queue/{candidate_id}", dependencies=[Depends(_authorize)]
-)
+@_api.delete("/api/memory-queue/{candidate_id}", dependencies=[Depends(_authorize)])
 async def _delete_memory_candidate(candidate_id: str) -> dict[str, bool]:
     before = len(_service.state.data["memory_queue"])
     _service.state.data["memory_queue"] = [
