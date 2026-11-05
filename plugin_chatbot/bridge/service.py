@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 from nonebot_plugin_alconna import Target, UniMessage
 
 from agent import Agent, PermissionRule, SessionStore, Tool, ToolContext
+from agent.llm import LLMClient
 from agent.memory import MEMORY_TYPES, ProjectMemoryStore, project_memory_tools
 from agent.messages import Message
 from agent.tools import builtin_tools
@@ -28,7 +29,14 @@ from .memes import (
     parse_annotation,
 )
 from .roles import RoleCards
-from .slang import extraction_prompt, parse_json_array, research_prompt
+from .slang import (
+    SLANG_REVIEW_SYSTEM_PROMPT,
+    extraction_prompt,
+    parse_json_array,
+    research_prompt,
+    review_prompt,
+    valid_meaning,
+)
 from .voice import VoiceLibrary
 
 if TYPE_CHECKING:
@@ -51,6 +59,8 @@ PENDING_MAX_CHARS = 2000
 PENDING_MAX_ROWS = 100
 PENDING_RECENT_LIMIT = 3
 PENDING_TIMESTAMP_FORMAT = "%Y-%m-%d %H:%M:%S"
+MAX_SLANG_REVIEW_BATCH = 20
+SLANG_REVIEW_TIMEOUT_SECONDS = 60
 MEMORY_FIELDS = ("title", "description", "type", "content")
 MEMORY_WRAPPER_KEYS = ("memory", "memories", "result", "data", "items")
 MODEL_CONTEXT_KEYS = (
@@ -159,6 +169,7 @@ class BridgeConfig:
     input_cost_per_million: float = 0.0
     output_cost_per_million: float = 0.0
     mcp_server_url: str = ""
+    meme_upload_enabled: bool = True
 
 
 @dataclass
@@ -373,6 +384,31 @@ def normalize_probability(value: Any) -> float | None:
     return probability
 
 
+def _clamp_setting(value: Any, default: int, low: int, high: int) -> int:
+    """Coerce one numeric setting into its documented bounds."""
+    try:
+        return max(low, min(int(value), high))
+    except (TypeError, ValueError, OverflowError):
+        return default
+
+
+def merge_slang_settings(
+    stored: dict[str, Any], updates: dict[str, Any]
+) -> dict[str, Any]:
+    """Merge partial slang settings without dropping unmentioned keys."""
+    merged = dict(stored)
+    merged.update(updates)
+    merged["enabled"] = bool(merged.get("enabled", True))
+    for field_name, default, low, high in (
+        ("min_messages", 10, 3, 100),
+        ("cooldown_seconds", 300, 30, 86400),
+    ):
+        merged[field_name] = _clamp_setting(
+            merged.get(field_name, default), default, low, high
+        )
+    return merged
+
+
 def pending_lines(rows: list[dict[str, Any]]) -> str:
     """Join buffered messages without timestamps for logging and slang windows."""
     return "\n".join(str(row.get("text") or "") for row in rows)
@@ -532,6 +568,9 @@ class BridgeService:
                         86400,
                     ),
                 )
+        saved_memes = self.state.data.get("meme_settings", {})
+        if isinstance(saved_memes, dict) and "upload_enabled" in saved_memes:
+            self.config.meme_upload_enabled = bool(saved_memes["upload_enabled"])
         if not self.state.path.exists():
             self.state.data["mode"] = config.mode
         self.state.save()
@@ -1593,6 +1632,8 @@ class BridgeService:
             return json.dumps(rows, ensure_ascii=False)
 
         async def save_meme(args: dict[str, Any], _ctx: ToolContext) -> str:
+            if not self.config.meme_upload_enabled:
+                return "Error: 表情包库暂不接收新表情"
             try:
                 image_index = int(args.get("image_index", 1))
                 images = self.current_images.get(key, [])
@@ -1884,6 +1925,128 @@ class BridgeService:
             raise RuntimeError("当前适配器无法发送语音/音频") from exc
         return True
 
+    def _slang_review_config(self) -> dict[str, str] | None:
+        """Resolve the configured review provider without any fallback."""
+        settings = self.state.data.get("slang_settings", {})
+        if not isinstance(settings, dict):
+            return None
+        provider_id = str(settings.get("review_provider_id") or "").strip()
+        if not provider_id:
+            return None
+        providers = self.state.data.get("interfaces", {}).get("providers", [])
+        provider = next(
+            (
+                row
+                for row in providers
+                if isinstance(row, dict) and str(row.get("id") or "") == provider_id
+            ),
+            None,
+        )
+        if provider is None:
+            return None
+        override = str(settings.get("review_model") or "").strip()
+        model = override or model_id(provider.get("model"))
+        base_url = str(provider.get("base_url") or "").strip()
+        if not model or not base_url:
+            return None
+        return {
+            "model": model,
+            "base_url": base_url,
+            "api_key": str(provider.get("api_key") or ""),
+        }
+
+    def _slang_review_client(self) -> LLMClient | None:
+        """Build a one-shot LLM client for slang review, or None if unconfigured."""
+        config = self._slang_review_config()
+        if config is None:
+            return None
+        return LLMClient(
+            model=config["model"],
+            base_url=config["base_url"],
+            api_key=config["api_key"],
+            temperature=0,
+            max_tokens=1024,
+            timeout=SLANG_REVIEW_TIMEOUT_SECONDS,
+            allow_environment_fallback=False,
+        )
+
+    async def _review_slang_batch(
+        self, key: str, rows: list[dict[str, Any]]
+    ) -> dict[str, int]:
+        """Review researched slang rows and persist the decisions in memory.
+
+        A valid explanation confirms the row; an empty or invalid one removes
+        the row entirely. Any client failure keeps the batch as candidates so
+        a transient provider outage can never delete entries by mistake.
+        """
+        batch = rows[:MAX_SLANG_REVIEW_BATCH]
+        tally = {"confirmed": 0, "deleted": 0, "skipped": len(batch)}
+        if not batch:
+            return tally
+        by_id = {
+            str(row.get("id") or ""): row
+            for row in self.state.data["slang"]
+            if isinstance(row, dict) and row.get("status") == "candidate"
+        }
+        client = self._slang_review_client()
+        if client is None:
+            self.state.log("黑话自动审核跳过：未配置有效的审核接口")
+            return tally
+        try:
+            response = await asyncio.wait_for(
+                client.complete(
+                    [Message(role="user", content=review_prompt(batch))],
+                    system_prompt=SLANG_REVIEW_SYSTEM_PROMPT,
+                ),
+                timeout=SLANG_REVIEW_TIMEOUT_SECONDS,
+            )
+            if response.usage:
+                self._record_usage(key, response.usage)
+            decisions = {
+                str(item.get("content", "")).strip(): item
+                for item in parse_json_array(str(response.content or ""))
+            }
+            if not decisions:
+                self.state.log("黑话自动审核失败：判定输出为空或无法解析")
+                return tally
+            tally.update(confirmed=0, deleted=0, skipped=0)
+            for row in batch:
+                target = by_id.get(str(row.get("id") or ""))
+                if target is None:
+                    tally["skipped"] += 1
+                    continue
+                item = decisions.get(str(row.get("term") or ""), {})
+                decision = str(item.get("decision", "")).strip().casefold()
+                if decision not in {"confirm", "reject"}:
+                    target["reviewer"] = "auto-failed"
+                    target["review_reason"] = "auto-review: 判定输出无效"
+                    tally["skipped"] += 1
+                    continue
+                reason = str(item.get("reason", ""))[:60]
+                if decision == "confirm" and valid_meaning(
+                    target.get("meaning"), str(target.get("term") or "")
+                ):
+                    target["status"] = "confirmed"
+                    target["reviewer"] = "auto"
+                    target["reviewed_at"] = time.time()
+                    target["review_reason"] = reason or "解释具体可用"
+                    tally["confirmed"] += 1
+                else:
+                    self.state.data["slang"] = [
+                        entry
+                        for entry in self.state.data["slang"]
+                        if entry is not target
+                    ]
+                    tally["deleted"] += 1
+            self.state.log(
+                f"黑话自动审核：放行 {tally['confirmed']} / "
+                f"删除 {tally['deleted']} / 跳过 {tally['skipped']}"
+            )
+        except Exception as exc:  # noqa: BLE001
+            self.state.log(f"黑话自动审核失败：{type(exc).__name__}")
+            return {"confirmed": 0, "deleted": 0, "skipped": len(batch)}
+        return tally
+
     async def _run_slang_agent(self, key: str, prompt: str, *, research: bool) -> str:
         record = self.state.data["conversations"].get(key, {})
         runtime_config = self.effective_chat_config(
@@ -2002,6 +2165,7 @@ class BridgeService:
                                     for source in result["sources"][:10]
                                 ]
                             row["researched_at"] = time.time()
+                        await self._review_slang_batch(key, candidates)
                     except Exception as exc:  # noqa: BLE001
                         self.state.log(f"黑话研究失败：{type(exc).__name__}")
                 self.state.save()

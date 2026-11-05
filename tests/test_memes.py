@@ -219,5 +219,74 @@ class MemeLibraryTests(unittest.TestCase):
         self.assertEqual([], self.library.list())
 
 
+class MemeLibraryUpdateDeleteTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._temp.cleanup)
+        self.library = MemeLibrary(Path(self._temp.name) / "memes", 1024)
+
+    def test_update_preserves_bytes_and_survives_records_reload(self) -> None:
+        path = self.library.save(PNG, ".png", annotation=make_annotation())
+        before = self.library.get(path.name)
+
+        updated = self.library.update(
+            path.name,
+            name="改名后的表情",
+            keywords=["新词", "测试", "表情", "点赞", "夸奖"],
+            summary="管理员修改的简介",
+        )
+
+        self.assertEqual(before["bytes"], updated["bytes"])
+        self.assertEqual("改名后的表情", updated["name"])
+        self.assertEqual("管理员修改的简介", updated["summary"])
+        self.assertIn("新词", updated["keywords"])
+        rows = self.library.list()
+        self.assertEqual(1, len(rows))
+        self.assertEqual("改名后的表情", rows[0]["name"])
+        self.assertEqual(before["bytes"], rows[0]["bytes"])
+        reopened = MemeLibrary(self.library.root, 1024)
+        self.assertEqual("改名后的表情", reopened.list()[0]["name"])
+
+    def test_update_backfilled_file_creates_index_row(self) -> None:
+        (self.library.root / "老表情.gif").write_bytes(GIF)
+
+        row = self.library.update("老表情.gif", name="补登表情", keywords="怀旧, 动图")
+
+        self.assertEqual(len(GIF), row["bytes"])
+        self.assertEqual("补登表情", row["name"])
+        self.assertEqual("补登表情", self.library.list()[0]["name"])
+
+    def test_update_rejects_unknown_or_traversal_file(self) -> None:
+        with self.assertRaises(ValueError):
+            self.library.update("../outside.png", name="越界")
+        with self.assertRaises(ValueError):
+            self.library.update("不存在.png", name="缺失")
+
+    def test_delete_removes_file_and_index_row(self) -> None:
+        path = self.library.save(PNG, ".png", annotation=make_annotation())
+
+        self.assertTrue(self.library.delete(path.name))
+
+        self.assertFalse(path.exists())
+        self.assertEqual([], self.library.list())
+        self.assertEqual([], MemeLibrary(self.library.root, 1024).list())
+        with self.assertRaises(ValueError):
+            self.library.delete(path.name)
+
+    def test_delete_confines_paths(self) -> None:
+        with self.assertRaises(ValueError):
+            self.library.delete("../outside.png")
+
+    def test_image_mimetype_covers_supported_suffixes(self) -> None:
+        for suffix, expected in (
+            (".png", "image/png"),
+            (".jpg", "image/jpeg"),
+            (".gif", "image/gif"),
+            (".webp", "image/webp"),
+        ):
+            with self.subTest(suffix=suffix):
+                self.assertEqual(expected, image_mimetype(suffix))
+
+
 if __name__ == "__main__":
     unittest.main()

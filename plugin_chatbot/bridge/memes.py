@@ -500,6 +500,84 @@ class MemeLibrary:
         scored.sort(key=lambda pair: (-pair[0], pair[1].file.casefold()))
         return [record.to_dict() for _, record in scored[:limit]]
 
+    # ═══ §5 管理操作 ═══
+
+    def get(self, name: str) -> dict[str, Any]:
+        """按文件名或短名返回单条索引记录。"""
+        path = self.resolve(name)
+        for record in self._records():
+            if record.file == path.name:
+                return record.to_dict()
+        raise ValueError("表情包索引不存在")
+
+    def update(
+        self,
+        file: str,
+        *,
+        name: str | None = None,
+        keywords: Any = None,
+        summary: str | None = None,
+    ) -> dict[str, Any]:
+        """修改索引元数据；不改图片、保留 bytes 以免触发读时回填。"""
+        with _WRITE_LOCK:
+            records = self._read_index()
+            record = next((row for row in records if row.file == file), None)
+            if record is None:
+                path = self._resolve_path(file)
+                record = MemeRecord(
+                    file=path.name,
+                    name=path.stem,
+                    keywords=(),
+                    summary="",
+                    size=path.stat().st_size,
+                )
+                records.append(record)
+            new_name = (
+                _clean_text(name, _NAME_MAX_CHARS) if name is not None else record.name
+            )
+            new_summary = (
+                _clean_text(summary, _SUMMARY_MAX_CHARS)
+                if summary is not None
+                else record.summary
+            )
+            new_keywords = (
+                normalize_keywords(
+                    keywords,
+                    name=new_name,
+                    summary=new_summary,
+                    suffix=Path(file).suffix,
+                )
+                if keywords is not None
+                else record.keywords
+            )
+            updated = MemeRecord(
+                file=record.file,
+                name=new_name,
+                keywords=new_keywords,
+                summary=new_summary,
+                size=record.size,
+            )
+            self._write_index(
+                [updated if row.file == record.file else row for row in records]
+            )
+            return updated.to_dict()
+
+    def delete(self, file: str) -> bool:
+        """删除图片与对应索引行；写索引失败时回滚图片。"""
+        with _WRITE_LOCK:
+            path = self._resolve_path(file)
+            records = self._read_index()
+            remaining = [row for row in records if row.file != path.name]
+            temp = path.with_suffix(path.suffix + ".del-tmp")
+            path.rename(temp)
+            try:
+                self._write_index(remaining)
+            except OSError:
+                temp.rename(path)
+                raise
+            temp.unlink(missing_ok=True)
+            return True
+
 
 def _query_terms(keywords: Any) -> tuple[str, ...]:
     if isinstance(keywords, str):

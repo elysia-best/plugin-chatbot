@@ -528,6 +528,8 @@ class BridgeServiceTests(unittest.TestCase):
             "enabled": False,
             "min_messages": 12,
             "cooldown_seconds": 900,
+            "review_provider_id": "p-review",
+            "review_model": "review-small",
         }
         self.service.state.save()
 
@@ -536,6 +538,14 @@ class BridgeServiceTests(unittest.TestCase):
         self.assertFalse(restored.config.slang_enabled)
         self.assertEqual(12, restored.config.slang_min_messages)
         self.assertEqual(900, restored.config.slang_cooldown_seconds)
+        self.assertEqual(
+            "p-review",
+            restored.state.data["slang_settings"]["review_provider_id"],
+        )
+        self.assertEqual(
+            "review-small",
+            restored.state.data["slang_settings"]["review_model"],
+        )
 
         restored.state.data["slang_settings"] = {
             "enabled": True,

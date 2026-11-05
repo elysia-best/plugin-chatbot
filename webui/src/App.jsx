@@ -1,9 +1,9 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   Activity, ArrowRight, Bot, Check, ChevronRight, CircleAlert, Eye, EyeOff,
-  BookOpen, Gauge, Home, KeyRound, LayoutList, LogOut, MessageCircle,
-  MessageSquareText, Pencil, Plug, Plus, RefreshCw, ScrollText, Server,
-  ShieldCheck, Sparkles, Trash2, UsersRound, Wrench, X,
+  BookOpen, Gauge, Home, Image as ImageIcon, KeyRound, LayoutList, LogOut,
+  MessageCircle, MessageSquareText, Pencil, Plug, Plus, RefreshCw, ScrollText,
+  Server, ShieldCheck, Sparkles, Trash2, Upload, UsersRound, Wrench, X,
 } from 'lucide-react';
 
 const NAV = [
@@ -13,6 +13,7 @@ const NAV = [
   { id: 'groups', label: '群聊策略', icon: UsersRound, hint: '群级策略覆盖' },
   { id: 'interfaces', label: '接口能力', icon: Plug, hint: '模型与工具目录' },
   { id: 'memory', label: '记忆管理', icon: BookOpen, hint: '全局 Memory 与黑话' },
+  { id: 'memes', label: '表情包', icon: ImageIcon, hint: '表情包库与工具' },
   { id: 'logs', label: '对话日志', icon: ScrollText, hint: '消息与用量记录' },
 ];
 
@@ -26,6 +27,14 @@ function api(token, path, method = 'GET', body) {
     if (!response.ok) throw new Error(data.detail || `请求失败（${response.status}）`);
     return data;
   });
+}
+
+async function apiBlob(token, path) {
+  const response = await fetch(`/chat-agent/api${path}`, {
+    headers: { 'x-console-token': token },
+  });
+  if (!response.ok) throw new Error(`请求失败（${response.status}）`);
+  return response.blob();
 }
 
 function Login({ onLogin }) {
@@ -52,8 +61,8 @@ function App() {
   useEffect(() => { if (token) refresh(); }, [token]);
   if (!token || !snapshot) { if (token && error) sessionStorage.removeItem('chatbot-console-token'); return <Login onLogin={setToken} />; }
   const active = NAV.find((item) => item.id === page) || NAV[0];
-  const props = { token, snapshot, roles, tools, onRefresh: refresh, onRolesChange: setRoles };
-  return <div className="app-shell"><aside className="sidebar"><div className="sidebar-brand"><div className="brand-mark small"><Sparkles size={16} /></div><div><strong>Chatbot</strong><span>control room</span></div></div><div className="sidebar-rule" /><div className="sidebar-caption">工作台</div><nav className="sidebar-nav">{NAV.map((item) => { const Icon = item.icon; return <button key={item.id} className={`nav-item ${page === item.id ? 'active' : ''}`} onClick={() => setPage(item.id)}><Icon size={17} /><span>{item.label}</span>{page === item.id && <ChevronRight className="nav-arrow" size={14} />}</button>; })}</nav><div className="sidebar-bottom"><div className="server-status"><span className="status-dot" /><div><strong>服务在线</strong><small>Alconna bridge</small></div></div><button className="logout-button" onClick={() => { sessionStorage.removeItem('chatbot-console-token'); setToken(''); setSnapshot(null); }}><LogOut size={16} />退出</button></div></aside><main className="main-shell"><header className="topbar"><div><span className="topbar-kicker">{active.hint}</span><h1>{active.label}</h1></div><div className="topbar-actions"><div className="connection-pill"><span className="status-dot" />已连接</div><button className="refresh-button" onClick={refresh} disabled={refreshing}><RefreshCw size={16} className={refreshing ? 'spin' : ''} />刷新</button></div></header>{error && <div className="global-error"><CircleAlert size={16} />{error}</div>}<div className="page-content">{page === 'overview' && <Overview {...props} onNavigate={setPage} />}{page === 'accounts' && <Accounts {...props} />}{page === 'personas' && <Personas {...props} />}{page === 'groups' && <Groups {...props} />}{page === 'interfaces' && <Interfaces {...props} />}{page === 'memory' && <Memory {...props} />}{page === 'logs' && <Logs {...props} />}</div></main></div>;
+  const props = { token, snapshot, roles, tools, onRefresh: refresh, onRolesChange: setRoles, onNavigate: setPage };
+  return <div className="app-shell"><aside className="sidebar"><div className="sidebar-brand"><div className="brand-mark small"><Sparkles size={16} /></div><div><strong>Chatbot</strong><span>control room</span></div></div><div className="sidebar-rule" /><div className="sidebar-caption">工作台</div><nav className="sidebar-nav">{NAV.map((item) => { const Icon = item.icon; return <button key={item.id} className={`nav-item ${page === item.id ? 'active' : ''}`} onClick={() => setPage(item.id)}><Icon size={17} /><span>{item.label}</span>{page === item.id && <ChevronRight className="nav-arrow" size={14} />}</button>; })}</nav><div className="sidebar-bottom"><div className="server-status"><span className="status-dot" /><div><strong>服务在线</strong><small>Alconna bridge</small></div></div><button className="logout-button" onClick={() => { sessionStorage.removeItem('chatbot-console-token'); setToken(''); setSnapshot(null); }}><LogOut size={16} />退出</button></div></aside><main className="main-shell"><header className="topbar"><div><span className="topbar-kicker">{active.hint}</span><h1>{active.label}</h1></div><div className="topbar-actions"><div className="connection-pill"><span className="status-dot" />已连接</div><button className="refresh-button" onClick={refresh} disabled={refreshing}><RefreshCw size={16} className={refreshing ? 'spin' : ''} />刷新</button></div></header>{error && <div className="global-error"><CircleAlert size={16} />{error}</div>}<div className="page-content">{page === 'overview' && <Overview {...props} onNavigate={setPage} />}{page === 'accounts' && <Accounts {...props} />}{page === 'personas' && <Personas {...props} />}{page === 'groups' && <Groups {...props} />}{page === 'interfaces' && <Interfaces {...props} />}{page === 'memory' && <Memory {...props} />}{page === 'memes' && <Memes {...props} />}{page === 'logs' && <Logs {...props} />}</div></main></div>;
 }
 
 function Overview({ snapshot, onNavigate }) {
@@ -183,7 +192,7 @@ function Interfaces({ token, snapshot, tools, onRefresh }) {
   async function remove(id) { if (!window.confirm('确认删除这个能力？')) return; await api(token, `/interfaces/${tab}/${id}`, 'DELETE'); await onRefresh(); }
   async function discover(id) { await api(token, `/interfaces/providers/${id}/models`, 'POST'); await onRefresh(); }
   const tabs = [['providers', 'AI 接口'], ['tools', 'Tools'], ['skills', 'Skill'], ['mcps', 'MCP'], ['rules', 'Rules']];
-  return <div className="page-stack"><PageIntro kicker="INTERFACE CAPABILITIES" title="接口能力" detail="管理 AI 接口、实际可用 Tools，以及群聊策略可以勾选的能力目录。" action={tab === 'tools' ? null : '新增能力'} onClick={() => setEditor({})} /><section className="surface"><div className="tabs">{tabs.map(([id, label]) => <button key={id} className={tab === id ? 'active' : ''} onClick={() => setTab(id)}>{label}</button>)}</div><div className="data-table">{rows.length ? rows.map((row) => <div className="data-row" key={row.id || row.name}><div className="identity-cell"><span className="capability-icon">{tab === 'tools' ? <Wrench size={16} /> : <Plug size={16} />}</span><div><strong>{row.name || row.id}</strong><small>{row.description || row.base_url || row.url || row.content || row.category || '尚未填写描述'}</small></div></div><div><span className="cell-label">{tab === 'providers' ? '模型' : tab === 'tools' ? '来源' : '类型'}</span><span>{tab === 'providers' ? `${row.models?.length || 0} 个已发现` : tab === 'tools' ? row.source : tab.toUpperCase()}</span></div><div className="row-actions">{tab === 'providers' && <button className="soft-button" onClick={() => discover(row.id)}><RefreshCw size={14} />拉取模型</button>}{tab !== 'tools' && <><button className="icon-button" title="编辑" onClick={() => setEditor(row)}><Pencil size={15} /></button><button className="icon-button danger" title="删除" onClick={() => remove(row.id)}><Trash2 size={15} /></button></>}</div></div>) : <Empty title={tab === 'tools' ? '暂无可用工具' : '还没有接口能力'} detail={tab === 'tools' ? '工具会根据当前桥接模式和 MCP 连接显示。' : '新增 AI 接口后可以在窗口中拉取模型。'} />}</div></section>{editor && <CapabilityEditor token={token} kind={tab} value={editor} onClose={() => setEditor(null)} onSave={save} />}</div>;
+  return <div className="page-stack"><PageIntro kicker="INTERFACE CAPABILITIES" title="接口能力" detail="管理 AI 接口、实际可用 Tools，以及群聊策略可以勾选的能力目录。" action={tab === 'tools' ? null : '新增能力'} onClick={() => setEditor({})} /><section className="surface"><div className="tabs">{tabs.map(([id, label]) => <button key={id} className={tab === id ? 'active' : ''} onClick={() => setTab(id)}>{label}</button>)}</div>{tab === 'mcps' && <OpenWebSearchCard token={token} />}<div className="data-table">{rows.length ? rows.map((row) => <div className="data-row" key={row.id || row.name}><div className="identity-cell"><span className="capability-icon">{tab === 'tools' ? <Wrench size={16} /> : <Plug size={16} />}</span><div><strong>{row.name || row.id}</strong><small>{row.description || row.base_url || row.url || row.content || row.category || '尚未填写描述'}</small></div></div><div><span className="cell-label">{tab === 'providers' ? '模型' : tab === 'tools' ? '来源' : '类型'}</span><span>{tab === 'providers' ? `${row.models?.length || 0} 个已发现` : tab === 'tools' ? row.source : tab.toUpperCase()}</span></div><div className="row-actions">{tab === 'providers' && <button className="soft-button" onClick={() => discover(row.id)}><RefreshCw size={14} />拉取模型</button>}{tab !== 'tools' && <><button className="icon-button" title="编辑" onClick={() => setEditor(row)}><Pencil size={15} /></button><button className="icon-button danger" title="删除" onClick={() => remove(row.id)}><Trash2 size={15} /></button></>}</div></div>) : <Empty title={tab === 'tools' ? '暂无可用工具' : '还没有接口能力'} detail={tab === 'tools' ? '工具会根据当前桥接模式和 MCP 连接显示。' : '新增 AI 接口后可以在窗口中拉取模型。'} />}</div></section>{editor && <CapabilityEditor token={token} kind={tab} value={editor} onClose={() => setEditor(null)} onSave={save} />}</div>;
 }
 
 function CapabilityEditor({ token, kind, value, onClose, onSave }) {
@@ -192,6 +201,25 @@ function CapabilityEditor({ token, kind, value, onClose, onSave }) {
   if (kind === 'providers') { const models = form.models || []; const selected = models.find((m) => m.id === modelId(form.model)); return <Modal title={value.id ? '编辑 AI 接口' : '新增 AI 接口'} onClose={onClose}><div className="form-grid two"><Field label="接口名称" value={form.name || ''} onChange={(v) => set('name', v)} /><Field label="Base URL" value={form.base_url || ''} onChange={(v) => set('base_url', v)} placeholder="https://api.example.com/v1" /><Field label="API Key" type="password" value={form.api_key || ''} onChange={(v) => set('api_key', v)} /><Field label="备用上下文大小" type="number" value={form.context_length || ''} onChange={(v) => set('context_length', v)} placeholder="远端未提供时使用" /><div className="field wide"><span>远端模型</span><div className="inline-actions"><button className="soft-button" disabled={busy} onClick={discover}><RefreshCw size={14} className={busy ? 'spin' : ''} />{busy ? '获取中…' : '获取模型'}</button><span className="muted">已获取 {models.length} 个模型</span></div></div><SelectField label="默认模型" value={modelId(form.model)} options={['', ...models.map((m) => m.id)]} labels={['不设置', ...models.map((m) => `${m.id}${m.context_length ? ` · ${m.context_length.toLocaleString()} tokens` : ''}`)]} onChange={(v) => set('model', v)} /><div className="field wide"><span>上下文说明</span><span className="muted">{selected?.context_length ? `当前模型远端上下文：${selected.context_length.toLocaleString()} tokens` : '当前模型未返回上下文，将使用备用设置或全局设置。'}</span></div></div>{error && <div className="form-error"><CircleAlert size={15} />{error}</div>}<ModalFooter onClose={onClose} onSave={() => onSave({ ...form, context_length: Number(form.context_length) || null })} /></Modal>; }
   const labels = { skills: ['Skill 名称', '描述'], mcps: ['MCP 名称', '服务地址'], rules: ['Rule 名称', '规则内容'] }[kind]; const contentKey = kind === 'mcps' ? 'url' : kind === 'rules' ? 'content' : 'description';
   return <Modal title={value.id ? '编辑能力' : '新增能力'} onClose={onClose}><div className="form-grid"><Field label={labels[0]} value={form.name || ''} onChange={(v) => set('name', v)} /><Field label={labels[1]} wide type="textarea" value={form[contentKey] || ''} onChange={(v) => set(contentKey, v)} /></div><ModalFooter onClose={onClose} onSave={() => onSave(form)} /></Modal>;
+}
+
+function OpenWebSearchCard({ token }) {
+  const [status, setStatus] = useState({ url: '', connected: false, error: '', tools: [] });
+  const [draft, setDraft] = useState(''); const [busy, setBusy] = useState(false); const [error, setError] = useState('');
+  useEffect(() => { api(token, '/mcp').then((next) => { setStatus(next); setDraft(next.url || ''); }).catch((err) => setError(err.message)); }, [token]);
+  async function connect(value) {
+    setBusy(true); setError('');
+    try { const next = await api(token, '/mcp', 'PUT', { value }); setStatus(next); setDraft(next.url || ''); }
+    catch (err) { setError(err.message); } finally { setBusy(false); }
+  }
+  const enabled = !!status.url;
+  return <div className="mcp-card">
+    <div className="mcp-card-head"><div><span className="kicker">BUILT-IN MCP</span><strong>open_websearch</strong><small>内置搜索 MCP；清空服务地址即禁用。工具在会话的工具配置中单独启用。</small></div><Status enabled={status.connected} /></div>
+    <label className="check-row"><input type="checkbox" checked={enabled} onChange={(event) => { if (!event.target.checked) connect(''); else { const next = draft || status.url || 'http://localhost:3000/mcp'; setDraft(next); connect(next); } }} />启用内置 MCP</label>
+    <div className="mcp-card-actions"><input aria-label="MCP 服务地址" value={draft} onChange={(event) => setDraft(event.target.value)} placeholder="http://localhost:3000/mcp" /><button className="soft-button" disabled={busy} onClick={() => connect(draft.trim())}><RefreshCw size={14} className={busy ? 'spin' : ''} />{busy ? '连接中…' : '连接 / 重新发现'}</button></div>
+    {(error || status.error) && <div className="form-error"><CircleAlert size={15} />{error || status.error}</div>}
+    <div className="inline-actions"><span className="muted">已发现 {status.tools?.length || 0} 个工具</span>{(status.tools || []).map((tool) => <span className="soft-tag" key={tool.name}>{tool.name}</span>)}</div>
+  </div>;
 }
 
 function conversationLabel(row) {
@@ -239,9 +267,10 @@ function Memory({ token, snapshot, onRefresh }) {
   const accounts = snapshot?.accounts || [];
   const [tab, setTab] = useState('global'); const [accountId, setAccountId] = useState(accounts[0]?.id || '');
   const [memories, setMemories] = useState([]); const [index, setIndex] = useState(''); const [queue, setQueue] = useState([]);
-  const [slang, setSlang] = useState([]); const [settings, setSettings] = useState({ enabled: true, min_messages: 10, cooldown_seconds: 300 });
+  const [slang, setSlang] = useState([]); const [settings, setSettings] = useState({ enabled: true, min_messages: 10, cooldown_seconds: 300, review_provider_id: '', review_model: '', review_configured: false });
   const [editor, setEditor] = useState(null); const [error, setError] = useState('');
   const [botSettings, setBotSettings] = useState({ enabled: true, interval: 50 }); const [savingSettings, setSavingSettings] = useState(false);
+  const [reviewDraft, setReviewDraft] = useState({ review_provider_id: '', review_model: '' });
   const account = accounts.find((row) => row.id === accountId);
   const memoryBase = tab === 'bot' && account ? `/accounts/${account.id}/memories` : '/memories';
   const slug = (title) => title.toLowerCase().normalize('NFKD').replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 64) || `memory-${Date.now()}`;
@@ -256,6 +285,7 @@ function Memory({ token, snapshot, onRefresh }) {
   useEffect(() => { if (!accountId && accounts[0]) setAccountId(accounts[0].id); }, [accounts, accountId]);
   useEffect(() => { setBotSettings({ enabled: account?.memory_enabled !== false, interval: account?.memory_interval || 50 }); }, [accountId, account?.memory_enabled, account?.memory_interval]);
   useEffect(() => { reload().catch((err) => setError(err.message)); }, [token, tab, accountId]);
+  useEffect(() => { setReviewDraft({ review_provider_id: settings.review_provider_id || '', review_model: settings.review_model || '' }); }, [settings.review_provider_id, settings.review_model]);
   async function saveBotSettings() {
     if (!account) return;
     setSavingSettings(true);
@@ -296,6 +326,7 @@ function Memory({ token, snapshot, onRefresh }) {
     catch (err) { setError(err.message); }
   }
   async function updateSettings(next) { try { const saved = await api(token, '/slang/settings', 'PUT', next); setSettings(saved); setError(''); } catch (err) { setError(err.message); } }
+  async function saveReviewSettings() { await updateSettings({ ...settings, ...reviewDraft }); }
   async function reviewSlang(row) { try { await api(token, `/slang/${row.id}`, 'PATCH', { status: row.status === 'confirmed' ? 'candidate' : 'confirmed' }); await reload(); } catch (err) { setError(err.message); } }
   async function removeSlang(id) { if (!window.confirm('确认删除这个黑话词条？')) return; try { await api(token, `/slang/${id}`, 'DELETE'); await reload(); } catch (err) { setError(err.message); } }
   const memoryTabs = [['global', '全局 Memory'], ['bot', 'Bot Memory'], ['review', `待审核（${queue.length}）`], ['slang', '黑话词库']];
@@ -309,10 +340,73 @@ function Memory({ token, snapshot, onRefresh }) {
         {(tab === 'global' || account) && <div className="memory-layout"><div className="data-table">{memories.length ? memories.map((row) => <div className="data-row memory-row" key={row.name}><div className="identity-cell"><span className="capability-icon"><BookOpen size={16} /></span><div><strong>{row.title}</strong><small>{row.name} · {row.type} · {row.chars} 字</small></div></div><div><span className="cell-label">说明</span><span>{row.description}</span></div><div className="row-actions"><button className="icon-button" title="编辑" onClick={() => openMemory(row)}><Pencil size={15} /></button><button className="icon-button danger" title="删除" onClick={() => removeMemory(row.name)}><Trash2 size={15} /></button></div></div>) : <Empty title={tab === 'global' ? '还没有全局记忆' : '这个 Bot 还没有记忆'} detail="添加长期有效的信息；自动总结的内容需先在待审核列表中通过。" />}</div>{tab === 'global' && <div className="memory-index"><SectionTitle title="Memory.md 索引" /><pre>{index || '索引为空，新增记忆后会自动生成。'}</pre></div>}</div>}
       </>}
       {tab === 'review' && <div className="data-table">{queue.length ? queue.map((row) => <div className="data-row memory-row" key={row.id}><div className="identity-cell"><span className="capability-icon"><BookOpen size={16} /></span><div><strong>{row.title}</strong><small>{row.platform} / {row.bot_id} · {row.source_messages} 条消息 · {formatTime(row.created_at)}</small></div></div><div><span className="cell-label">摘要</span><span>{row.description}<br />{row.content}</span></div><div className="row-actions"><button className="soft-button" onClick={() => approveCandidate(row)}>通过</button><button className="icon-button" title="编辑" onClick={() => setEditor({ ...row, queueId: row.id, name: row.name || slug(row.title) })}><Pencil size={15} /></button><button className="icon-button danger" title="删除" onClick={() => removeCandidate(row.id)}><Trash2 size={15} /></button></div></div>) : <Empty title="没有待审核记忆" detail="Bot 按账号设置的消息数量整理出草稿后，会显示在这里。" />}</div>}
-      {tab === 'slang' && <><div className="slang-settings"><label className="check-row"><input type="checkbox" checked={settings.enabled} onChange={(event) => updateSettings({ ...settings, enabled: event.target.checked })} />自动学习黑话</label><span className="muted">每 {settings.min_messages} 条群消息触发一次，冷却 {settings.cooldown_seconds} 秒</span></div><div className="data-table">{slang.length ? slang.map((row) => <div className="data-row slang-row" key={row.id}><div className="identity-cell"><span className="capability-icon"><MessageSquareText size={16} /></span><div><strong>{row.term}</strong><small>{row.status === 'confirmed' ? '已确认' : row.status === 'rejected' ? '已忽略' : '待审核'}</small></div></div><div><span className="cell-label">含义</span><span>{row.meaning || '尚未补充'}</span></div><div className="row-actions"><button className="soft-button" onClick={() => reviewSlang(row)}>{row.status === 'confirmed' ? '标为待审核' : '确认词条'}</button><button className="icon-button" title="编辑" onClick={() => setEditor({ ...row })}><Pencil size={15} /></button><button className="icon-button danger" title="删除" onClick={() => removeSlang(row.id)}><Trash2 size={15} /></button></div></div>) : <Empty title="还没有黑话词条" detail="自动学习或手动添加的群聊用语会显示在这里。" />}</div></>}
+      {tab === 'slang' && <><div className="slang-settings"><label className="check-row"><input type="checkbox" checked={settings.enabled} onChange={(event) => updateSettings({ ...settings, enabled: event.target.checked })} />自动学习黑话</label><span className="muted">每 {settings.min_messages} 条群消息触发一次，冷却 {settings.cooldown_seconds} 秒</span></div><div className="slang-settings review-settings"><SelectField label="自动审核接口" value={reviewDraft.review_provider_id} options={['', ...(snapshot.interfaces?.providers || []).map((p) => p.id)]} labels={['不审核（新词保持待审核）', ...(snapshot.interfaces?.providers || []).map((p) => providerLabel(p))]} onChange={(value) => setReviewDraft({ ...reviewDraft, review_provider_id: value })} /><Field label="审核模型（可选）" value={reviewDraft.review_model} onChange={(value) => setReviewDraft({ ...reviewDraft, review_model: value })} placeholder="留空使用接口默认模型" /><button className="soft-button" onClick={saveReviewSettings}>保存审核配置</button>{!settings.review_configured && <span className="form-error"><CircleAlert size={15} />未配置审核接口，新词将保持待审核</span>}<span className="muted">研究完成后自动判定：有效解释放行，无效词条直接删除；接口故障时保持待审核。</span></div><div className="data-table">{slang.length ? slang.map((row) => <div className="data-row slang-row" key={row.id}><div className="identity-cell"><span className="capability-icon"><MessageSquareText size={16} /></span><div><strong>{row.term}</strong><small>{row.status === 'confirmed' ? '已确认' : row.status === 'rejected' ? '已忽略' : '待审核'}{row.reviewer ? ` · ${row.reviewer === 'auto' ? '自动放行' : row.reviewer === 'manual' ? '人工复议' : '审核未判定'}` : ''}</small></div></div><div><span className="cell-label">含义</span><span>{row.meaning || '尚未补充'}{row.review_reason ? ` · ${row.review_reason}` : ''}</span></div><div className="row-actions"><button className="soft-button" onClick={() => reviewSlang(row)}>{row.status === 'confirmed' ? '标为待审核' : '确认词条'}</button><button className="icon-button" title="编辑" onClick={() => setEditor({ ...row })}><Pencil size={15} /></button><button className="icon-button danger" title="删除" onClick={() => removeSlang(row.id)}><Trash2 size={15} /></button></div></div>) : <Empty title="还没有黑话词条" detail="自动学习或手动添加的群聊用语会显示在这里。" />}</div></>}
     </section>
     {(showMemoryEditor || editor?.queueId) && <Modal title={editor.queueId ? '编辑待审核记忆' : `${tab === 'global' ? '全局' : 'Bot'} Memory`} onClose={() => setEditor(null)}><div className="form-grid two"><Field label="稳定名称" value={editor.name} onChange={(value) => setEditor({ ...editor, name: value })} placeholder="例如 project-guidelines" /><Field label="标题" value={editor.title} onChange={(value) => setEditor({ ...editor, title: value })} /><Field label="类型" value={editor.type} onChange={(value) => setEditor({ ...editor, type: value })} /><Field label="说明" value={editor.description} onChange={(value) => setEditor({ ...editor, description: value })} /><Field label="记忆内容" wide type="textarea" value={editor.content} onChange={(value) => setEditor({ ...editor, content: value })} /></div><ModalFooter onClose={() => setEditor(null)} onSave={saveMemory} /></Modal>}
     {editor && tab === 'slang' && <Modal title={editor.id ? '编辑黑话词条' : '新增黑话词条'} onClose={() => setEditor(null)}><div className="form-grid two"><Field label="黑话" value={editor.term} onChange={(value) => setEditor({ ...editor, term: value })} /><Field label="含义" wide type="textarea" value={editor.meaning} onChange={(value) => setEditor({ ...editor, meaning: value })} /></div>{error && <div className="form-error"><CircleAlert size={15} />{error}</div>}<ModalFooter onClose={() => setEditor(null)} onSave={saveSlang} /></Modal>}
+  </div>;
+}
+
+function Memes({ token, tools, onNavigate, onRefresh }) {
+  const [rows, setRows] = useState([]); const [settings, setSettings] = useState({ upload_enabled: true, max_bytes: 0 });
+  const [query, setQuery] = useState(''); const [thumbs, setThumbs] = useState({});
+  const [editor, setEditor] = useState(null); const [error, setError] = useState(''); const [busy, setBusy] = useState(false);
+  const thumbsRef = useRef({});
+  async function reload() {
+    const [list, config] = await Promise.all([api(token, '/memes'), api(token, '/memes/settings')]);
+    setRows(list); setSettings(config); setError('');
+    const next = {};
+    await Promise.all(list.map(async (row) => {
+      try { next[row.file] = URL.createObjectURL(await apiBlob(token, `/memes/image/${encodeURIComponent(row.file)}`)); }
+      catch { /* 缩略图失败时保留占位图标 */ }
+    }));
+    Object.values(thumbsRef.current).forEach((url) => URL.revokeObjectURL(url));
+    thumbsRef.current = next; setThumbs(next);
+  }
+  useEffect(() => {
+    reload().catch((err) => setError(err.message));
+    return () => { Object.values(thumbsRef.current).forEach((url) => URL.revokeObjectURL(url)); thumbsRef.current = {}; };
+  }, [token]);
+  async function upload(event) {
+    const file = event.target.files?.[0]; if (!file) return;
+    if (settings.max_bytes && file.size > settings.max_bytes) { setError('图片超过大小限制'); return; }
+    setBusy(true); setError('');
+    try {
+      const data = await new Promise((resolve, reject) => { const reader = new FileReader(); reader.onload = () => resolve(reader.result); reader.onerror = reject; reader.readAsDataURL(file); });
+      await api(token, '/memes', 'POST', { name: file.name.replace(/\.[^.]+$/, ''), data });
+      await reload(); await onRefresh();
+    } catch (err) { setError(err.message); } finally { setBusy(false); event.target.value = ''; }
+  }
+  async function saveEditor() {
+    try {
+      await api(token, `/memes/${encodeURIComponent(editor.file)}`, 'PUT', { name: editor.name.trim(), keywords: editor.keywords, summary: editor.summary });
+      setEditor(null); await reload();
+    } catch (err) { setError(err.message); }
+  }
+  async function remove(row) {
+    if (!window.confirm(`确认删除表情包“${row.name}”？`)) return;
+    try { await api(token, `/memes/${encodeURIComponent(row.file)}`, 'DELETE'); await reload(); }
+    catch (err) { setError(err.message); }
+  }
+  async function toggleUpload(checked) {
+    try { setSettings(await api(token, '/memes/settings', 'PUT', { upload_enabled: checked })); }
+    catch (err) { setError(err.message); }
+  }
+  const visible = query.trim() ? rows.filter((row) => `${row.name} ${(row.keywords || []).join(' ')} ${row.summary}`.toLowerCase().includes(query.trim().toLowerCase())) : rows;
+  const memeTools = ['chat_list_memes', 'chat_save_meme', 'chat_send_meme'];
+  return <div className="page-stack">
+    <PageIntro kicker="MEME LIBRARY" title="表情包" detail={error || `${rows.length} 张表情；上传后可在聊天里通过 chat_send_meme 发送。`} action="上传图片" onClick={() => document.getElementById('meme-file-input')?.click()} />
+    <input id="meme-file-input" type="file" accept="image/png,image/jpeg,image/gif,image/webp" hidden disabled={busy || !settings.upload_enabled} onChange={upload} />
+    <section className="surface">
+      <div className="slang-settings"><input aria-label="搜索表情包" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索名称、关键词或简介" /><button className="soft-button" disabled={busy || !settings.upload_enabled} onClick={() => document.getElementById('meme-file-input')?.click()}><Upload size={14} />选择图片</button><label className="check-row"><input type="checkbox" checked={settings.upload_enabled} onChange={(event) => toggleUpload(event.target.checked)} />允许新增表情包（WebUI 与 chat_save_meme）</label><span className="muted">单图上限 {Math.round((settings.max_bytes || 0) / 1024)} KB · {busy ? '上传中…' : '就绪'}</span></div>
+      <div className="meme-grid">{visible.length ? visible.map((row) => <div className="meme-card" key={row.file}>
+        <div className="meme-thumb">{thumbs[row.file] ? <img src={thumbs[row.file]} alt={row.name} /> : <ImageIcon size={22} />}</div>
+        <div className="meme-meta"><strong>{row.name}</strong><small>{row.file} · {row.bytes} B</small><span>{row.summary || '暂无简介'}</span><div className="meme-tags">{(row.keywords || []).map((keyword) => <span className="soft-tag" key={keyword}>{keyword}</span>)}</div></div>
+        <div className="row-actions"><button className="icon-button" title="编辑" onClick={() => setEditor({ ...row, keywords: (row.keywords || []).join('、') })}><Pencil size={15} /></button><button className="icon-button danger" title="删除" onClick={() => remove(row)}><Trash2 size={15} /></button></div>
+      </div>) : <Empty title="还没有表情包" detail="上传图片，或让 Bot 在聊天里通过 chat_save_meme 保存。" />}</div>
+    </section>
+    <section className="surface meme-tool-card"><SectionTitle title="工具开关" /><p className="muted">在平台账号 / 群聊策略编辑器的「工具默认」中勾选；会话级覆盖使用对话日志里的会话工具设置。</p><div className="inline-actions">{memeTools.map((name) => <span className="soft-tag" key={name}>{name} · {(tools || []).some((tool) => tool.name === name) ? '可用' : '未列出'}</span>)}</div><div className="inline-actions"><button className="soft-button" onClick={() => onNavigate('accounts')}>平台账号</button><button className="soft-button" onClick={() => onNavigate('groups')}>群聊策略</button><button className="soft-button" onClick={() => onNavigate('logs')}>会话工具</button></div></section>
+    {editor && <Modal title="编辑表情包" onClose={() => setEditor(null)}><div className="form-grid two"><Field label="名称" value={editor.name} onChange={(value) => setEditor({ ...editor, name: value })} /><Field label="关键词（逗号或顿号分隔）" value={editor.keywords} onChange={(value) => setEditor({ ...editor, keywords: value })} /><Field label="简介" wide type="textarea" value={editor.summary} onChange={(value) => setEditor({ ...editor, summary: value })} /></div>{error && <div className="form-error"><CircleAlert size={15} />{error}</div>}<ModalFooter onClose={() => setEditor(null)} onSave={saveEditor} /></Modal>}
   </div>;
 }
 

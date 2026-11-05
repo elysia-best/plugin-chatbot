@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 from fastapi import Depends, FastAPI, Header, HTTPException
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from nonebot import get_driver, get_plugin_config, logger, on_message
 from nonebot.adapters import Bot, Event  # noqa: TC002
@@ -20,9 +20,16 @@ from nonebot_plugin_alconna import Image, Target, UniMessage, get_target, image_
 from pydantic import BaseModel
 
 from plugin_chatbot.bridge import BridgeConfig, BridgeService
+from plugin_chatbot.bridge.memes import (
+    MemeAnnotation,
+    decode_image_data_url,
+    image_mimetype,
+    normalize_keywords,
+)
 from plugin_chatbot.bridge.service import (
     DEFAULT_REPLY_PROBABILITY,
     IncomingMessage,
+    merge_slang_settings,
     normalize_model_records,
     normalize_probability,
     positive_context_length,
@@ -54,6 +61,7 @@ class Settings(BaseModel):
     bridge_max_media_bytes: int = 8 * 1024 * 1024
     bridge_console_token: str = ""
     bridge_mcp_server_url: str = ""
+    bridge_meme_upload_enabled: bool = True
     bridge_voice_dir: str = ""
     bridge_voice_max_bytes: int = 20 * 1024 * 1024
     bridge_voice_max_text_chars: int = 500
@@ -94,6 +102,7 @@ _service = BridgeService(
         ),
         console_token=_settings.bridge_console_token,
         mcp_server_url=_settings.bridge_mcp_server_url,
+        meme_upload_enabled=_settings.bridge_meme_upload_enabled,
         voice_dir=Path(_settings.bridge_voice_dir).resolve()
         if _settings.bridge_voice_dir
         else None,
@@ -1044,6 +1053,23 @@ class SlangSettingsRequest(BaseModel):
     enabled: bool
     min_messages: int
     cooldown_seconds: int
+    review_provider_id: str = ""
+    review_model: str = ""
+
+
+class MemeUploadRequest(BaseModel):
+    name: str
+    data: str
+
+
+class MemeMetadataRequest(BaseModel):
+    name: str
+    keywords: str | list[str]
+    summary: str
+
+
+class MemeSettingsRequest(BaseModel):
+    upload_enabled: bool | None = None
 
 
 @_api.put("/api/mode", dependencies=[Depends(_authorize)])
@@ -1155,6 +1181,8 @@ async def _review_slang(entry_id: str, body: dict[str, str]) -> dict[str, Any]:
             if status not in {"confirmed", "rejected", "candidate"}:
                 raise HTTPException(status_code=422, detail="Invalid status")
             row["status"] = status
+            row["reviewer"] = "manual"
+            row["reviewed_at"] = time.time()
             if "meaning" in body:
                 row["meaning"] = body["meaning"][:1000]
             _service.state.save()
@@ -1576,25 +1604,126 @@ async def _delete_voice(name: str) -> dict[str, bool]:
 
 @_api.get("/api/slang/settings", dependencies=[Depends(_authorize)])
 async def _slang_settings() -> dict[str, Any]:
+    stored = _service.state.data.get("slang_settings", {})
+    if not isinstance(stored, dict):
+        stored = {}
     return {
         "enabled": _service.config.slang_enabled,
         "min_messages": _service.config.slang_min_messages,
         "cooldown_seconds": _service.config.slang_cooldown_seconds,
+        "review_provider_id": str(stored.get("review_provider_id") or ""),
+        "review_model": str(stored.get("review_model") or ""),
+        "review_configured": _service._slang_review_config() is not None,
     }
 
 
 @_api.put("/api/slang/settings", dependencies=[Depends(_authorize)])
 async def _update_slang_settings(body: SlangSettingsRequest) -> dict[str, Any]:
-    _service.config.slang_enabled = body.enabled
-    _service.config.slang_min_messages = max(3, min(body.min_messages, 100))
-    _service.config.slang_cooldown_seconds = max(30, min(body.cooldown_seconds, 86400))
-    _service.state.data["slang_settings"] = {
-        "enabled": _service.config.slang_enabled,
-        "min_messages": _service.config.slang_min_messages,
-        "cooldown_seconds": _service.config.slang_cooldown_seconds,
-    }
+    stored = _service.state.data.get("slang_settings")
+    if not isinstance(stored, dict):
+        stored = {}
+    merged = merge_slang_settings(stored, body.model_dump(exclude_unset=True))
+    _service.state.data["slang_settings"] = merged
+    _service.config.slang_enabled = merged["enabled"]
+    _service.config.slang_min_messages = merged["min_messages"]
+    _service.config.slang_cooldown_seconds = merged["cooldown_seconds"]
     _service.state.save()
     return await _slang_settings()
+
+
+@_api.get("/api/memes", dependencies=[Depends(_authorize)])
+async def _list_memes() -> list[dict[str, Any]]:
+    return _service.memes.list()
+
+
+@_api.get("/api/memes/settings", dependencies=[Depends(_authorize)])
+async def _meme_settings() -> dict[str, Any]:
+    return {
+        "upload_enabled": _service.config.meme_upload_enabled,
+        "max_bytes": _service.config.max_media_bytes,
+    }
+
+
+@_api.put("/api/memes/settings", dependencies=[Depends(_authorize)])
+async def _update_meme_settings(body: MemeSettingsRequest) -> dict[str, Any]:
+    stored = _service.state.data.get("meme_settings")
+    if not isinstance(stored, dict):
+        stored = {}
+        _service.state.data["meme_settings"] = stored
+    updates = body.model_dump(exclude_unset=True, exclude_none=True)
+    if "upload_enabled" in updates:
+        stored["upload_enabled"] = bool(updates["upload_enabled"])
+        _service.config.meme_upload_enabled = stored["upload_enabled"]
+    _service.state.save()
+    return await _meme_settings()
+
+
+@_api.get("/api/memes/image/{file:path}", dependencies=[Depends(_authorize)])
+async def _meme_image(file: str) -> Response:
+    try:
+        path = _service.memes.resolve(file)
+        content = await asyncio.to_thread(path.read_bytes)
+    except (OSError, ValueError) as exc:
+        raise HTTPException(status_code=404, detail="Meme not found") from exc
+    return Response(
+        content=content,
+        media_type=image_mimetype(path.suffix),
+        headers={"Cache-Control": "no-cache"},
+    )
+
+
+@_api.post("/api/memes", dependencies=[Depends(_authorize)])
+async def _upload_meme(body: MemeUploadRequest) -> dict[str, Any]:
+    if not _service.config.meme_upload_enabled:
+        raise HTTPException(status_code=409, detail="Meme uploads are disabled")
+    try:
+        data, suffix = decode_image_data_url(body.data, _service.memes.max_bytes)
+        display_name = body.name.strip()[:48] or "表情包"
+        annotation = MemeAnnotation(
+            allowed=True,
+            name=display_name,
+            keywords=normalize_keywords(
+                [], name=display_name, summary="", suffix=suffix
+            ),
+            summary="",
+            reason="",
+        )
+        path = _service.memes.save(data, suffix, annotation=annotation)
+        return _service.memes.get(path.name)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@_api.get("/api/memes/{name}", dependencies=[Depends(_authorize)])
+async def _meme_detail(name: str) -> dict[str, Any]:
+    try:
+        return _service.memes.get(name)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail="Meme not found") from exc
+
+
+@_api.put("/api/memes/{name}", dependencies=[Depends(_authorize)])
+async def _update_meme(name: str, body: MemeMetadataRequest) -> dict[str, Any]:
+    try:
+        path = _service.memes.resolve(name)
+        return _service.memes.update(
+            path.name,
+            name=body.name,
+            keywords=body.keywords,
+            summary=body.summary,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@_api.delete("/api/memes/{name}", dependencies=[Depends(_authorize)])
+async def _delete_meme(name: str) -> dict[str, bool]:
+    try:
+        path = _service.memes.resolve(name)
+        _service.memes.delete(path.name)
+    except (OSError, ValueError) as exc:
+        raise HTTPException(status_code=404, detail="Meme not found") from exc
+    return {"deleted": True}
 
 
 _webui_static = Path(__file__).with_name("webui")

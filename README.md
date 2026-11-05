@@ -25,6 +25,9 @@ BRIDGE_SLANG_MIN_MESSAGES=10
 BRIDGE_SLANG_COOLDOWN_SECONDS=300
 BRIDGE_INPUT_COST_PER_MILLION=0
 BRIDGE_OUTPUT_COST_PER_MILLION=0
+BRAVE_API_KEY=
+BRIDGE_MCP_SERVER_URL=
+BRIDGE_MEME_UPLOAD_ENABLED=true
 ```
 
 Configure each Bot's administrator, white, and black lists in the **平台账号** editor. Newly discovered conversations stay **待确认** until an administrator approves them or adds them to the white list. The default state path is `<project>/.agent/bridge`; keep it private because it contains conversation mappings, activity, and usage records. The management console is mounted at `/chat-agent/` on the existing NoneBot FastAPI server. The console token is generated and saved under the state directory if none is configured.
@@ -33,7 +36,7 @@ Configure the model connection under **接口能力**, then select that Provider
 
 ## Behavior
 
-- `chat` exposes conversation tools and read-only `WebSearch`, then sends the final reply. Configure `BRAVE_API_KEY` in the process environment to enable searches.
+- `chat` exposes conversation tools and read-only `WebSearch`, then sends the final reply. Configure `BRAVE_API_KEY` in the process environment to enable the built-in Brave-backed search. The MCP `open_websearch` server is a **separate** channel configured with `BRIDGE_MCP_SERVER_URL` or the console card; when the connected MCP server exposes a tool named `search`, the built-in `WebSearch` is suppressed for that session.
 - `agent` accepts only administrator private messages and adds this repository's coding tools. Normal Agent permission rules and the approval callback still apply.
 - Both modes include the configured persona or active role card in the system prompt. Agent mode also keeps that persona while using coding tools.
 - The console's session table lets administrators choose enabled tools per conversation. New sessions enable all tools available in the current mode; changing modes clears session overrides and restores each session's defaults.
@@ -42,11 +45,12 @@ Configure the model connection under **接口能力**, then select that Provider
 - Chat targets are allowlisted by group or private peer. Replies are checked for credential-like values and local paths before sending, then split at configured message length.
 - Incoming images are passed to vision-capable OpenAI-compatible models through Alconna's image fetch helper and size-limited inline data. Unsupported media remains an explicit text notice.
 - `chat_save_meme` runs one vision pass that performs the safety review and recognises the image, storing a short name, 5-8 search keywords and a one-line summary in `memes.json` alongside the image. `chat_list_memes` accepts a `keywords` filter and returns that compact catalog so the model can pick a meme; `chat_send_meme` accepts the returned `file` or the short name. Legacy image files are backfilled into the index automatically.
+- The **表情包** page lists the library with authenticated thumbnails and supports editing the name / keywords / summary, uploading and deleting images. An `允许新增表情包` switch (`meme_settings.upload_enabled`, env `BRIDGE_MEME_UPLOAD_ENABLED`, default `true`) blocks both WebUI uploads and `chat_save_meme` when off; the single-image size limit (`BRIDGE_MAX_MEDIA_BYTES`) is shown read-only. WebUI uploads use administrator-supplied metadata and do not run the vision review reserved for untrusted chat images. The three `chat_*_meme` tools are still enabled per account / group / session through the existing tool selection.
 - Media is sent as inline bytes (`base64://` on OneBot v11), not as a local `file:///` path, so it works when the OneBot implementation runs on another host or in a container.
 - Speech uses a confined local audio library and offline `pyttsx3`; install `pyttsx3` plus a system speech engine to use synthesis. Adapters that cannot send audio return an error.
-- Group slang extraction is rate-limited, researches candidates with the Agent's `WebSearch` / `WebFetch` tools, and leaves every result for administrator review before prompt injection.
+- Group slang extraction is rate-limited and researches candidates with the Agent's `WebSearch` / `WebFetch` tools. After a successful research pass, an optional auto review configured under **记忆管理 → 黑话词库** calls a selected AI Provider once per batch (up to 20 terms): a concrete explanation confirms the entry, while an empty, placeholder, uncertain or invalid explanation **deletes the row entirely**. Provider failures, timeouts and unparseable output keep the batch as `candidate` for a later retry. Only newly researched terms are reviewed; existing candidates and manual entries stay untouched, and manual status changes are never overwritten. Confirmations are the only entries injected into the system prompt.
 - Memory-draft output is parsed defensively: code fences, trailing prose, concatenated JSON values, top-level arrays and envelope keys are all accepted, and list/dict field values are normalised to text. A batch that still fails keeps its buffered exchanges and is retried with exponential backoff (60 seconds up to 15 minutes), so one bad model reply cannot trigger a retry on every incoming message.
-- The console provides persona and role-card management, global memory and slang management, initial prompts, approvals, and per-group or per-private-chat Agent transcripts with a clear button. It also shows activity, token and estimated-cost records and audio-library management. Set input/output cost rates per million tokens to enable cost estimates.
+- The console provides persona and role-card management, global memory, slang and meme-library management, initial prompts, approvals, and per-group or per-private-chat Agent transcripts with a clear button. It also shows activity, token and estimated-cost records and audio-library management. Set input/output cost rates per million tokens to enable cost estimates.
 
 Bridge persistence is separate from the Agent's normal coding sessions. Message transport always goes through Alconna abstractions; features such as native reply references depend on the adapter's exported segment support.
 
@@ -73,7 +77,7 @@ The management panel now keeps configuration in three layers:
 
 - **Account**: `adapter/platform + bot_id` identifies one connected Bot. Each Bot selects a configured Provider and model and has its own reasoning effort, context fallback, persona template, supplement prompt, enabled tools, and access lists.
 - **Group**: `adapter/platform + bot_id + group_id` identifies one group attached to one Bot. Group settings can override provider, model, prompt, reply probability, reasoning effort, cost limit, and enabled tools.
-- **Interfaces**: providers, skills, MCP servers, rules, and the runtime tool catalog are managed from the console. Provider records expose model discovery and preserve recognized context-window metadata for transcript compression.
+- **Interfaces**: providers, skills, MCP servers, rules, and the runtime tool catalog are managed from the console. Provider records expose model discovery and preserve recognized context-window metadata for transcript compression. The **MCP** tab additionally hosts a built-in `open_websearch` connection card (enable switch, service URL, connect / re-discover, connection status and discovered tools). It writes the persisted top-level `mcp_server_url` through `GET/PUT /api/mcp`; the `interfaces.mcps` list remains a catalog only. Currently one streamable-HTTP MCP server is supported, its exposed tool names are fixed to the `mcp__open_websearch__` prefix, and a `search` tool on it suppresses the built-in `WebSearch`.
 
 Account and group records are stored in `bridge-state.json` under `BRIDGE_STATE_DIR`. The old `AGENT_MODEL`, `AGENT_BASE_URL`, `AGENT_API_KEY`, `AGENT_REASONING_EFFORT`, `BRIDGE_OWNER_IDS`, `BRIDGE_ALLOWED_GROUPS`, and `BRIDGE_ALLOWED_PRIVATE` settings are no longer used by the bridge.
 
