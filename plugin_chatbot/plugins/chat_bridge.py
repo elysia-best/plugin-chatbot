@@ -113,31 +113,35 @@ _service = BridgeService(
 _message = on_message(priority=20, block=False)
 
 
-async def _message_content(
-    message: Any, event: Event, bot: Bot
-) -> tuple[str, list[dict[str, Any]]]:
-    try:
-        unified = UniMessage.of(message, bot=bot)
-        plain = unified.extract_plain_text().strip()
-    except (AttributeError, TypeError):
-        unified = UniMessage()
-        plain = str(message).strip()
-    media_types = {str(getattr(segment, "type", "")) for segment in unified}
-    placeholders = [
-        label
-        for kind, label in (
-            ("audio", "[收到音频；当前桥接未配置语音转写]"),
-            ("voice", "[收到语音；当前桥接未配置语音转写]"),
-            ("video", "[收到视频；当前模型接口不能读取视频内容]"),
-            ("file", "[收到文件；当前桥接未配置文件解析]"),
-        )
-        if kind in media_types
-    ]
+def _segment_text(segment: Any, bot_id: str) -> str:
+    kind = str(getattr(segment, "type", ""))
+    data = getattr(segment, "data", {})
+    if kind == "text":
+        return str(data.get("text", ""))
+    if kind in {"at", "mention_user"}:
+        target_id = str(data.get("qq") or data.get("user_id") or "")
+        target_name = str(data.get("username") or "").strip()
+        if target_id == bot_id or bool(data.get("is_bot")):
+            return "@我"
+        return f"@{target_name or target_id}"
+    return ""
+
+
+def _media_kind(kind: str) -> str:
+    if kind in {"audio", "voice", "record"}:
+        return "audio"
+    if kind in {"video", "file"}:
+        return kind
+    return ""
+
+
+async def _image_content(
+    image_segments: list[Any], event: Event, bot: Bot
+) -> tuple[list[dict[str, Any]], list[str]]:
     content: list[dict[str, Any]] = []
+    placeholders: list[str] = []
     media_bytes = 0
-    for segment in unified:
-        if not isinstance(segment, Image) and getattr(segment, "type", "") != "image":
-            continue
+    for segment in image_segments:
         if len(content) >= MAX_IMAGES_PER_MESSAGE:
             placeholders.append("[图片数量超过单条消息上限]")
             continue
@@ -162,7 +166,81 @@ async def _message_content(
         encoded = base64.b64encode(raw_bytes).decode("ascii")
         uri = f"data:{mimetype};base64,{encoded}"
         content.append({"type": "image_url", "image_url": {"url": uri}})
+    return content, placeholders
+
+
+async def _message_content(
+    message: Any, event: Event, bot: Bot
+) -> tuple[str, list[dict[str, Any]]]:
+    try:
+        unified = UniMessage.of(message, bot=bot)
+    except (AttributeError, TypeError):
+        unified = UniMessage()
+    if not unified:
+        fallback = str(message).strip()
+        return fallback, []
+
+    text_parts: list[str] = []
+    image_segments: list[Any] = []
+    media_types: set[str] = set()
+    emoji_count = 0
+    bot_id = str(getattr(bot, "self_id", ""))
+    for segment in unified:
+        kind = str(getattr(segment, "type", ""))
+        if kind in {"text", "at", "mention_user"}:
+            text_parts.append(_segment_text(segment, bot_id))
+        elif kind in {"face", "emoji"}:
+            emoji_count += 1
+        elif kind == "image" or isinstance(segment, Image):
+            image_segments.append(segment)
+        elif media_kind := _media_kind(kind):
+            media_types.add(media_kind)
+    plain = "".join(text_parts).strip()
+    placeholders = [
+        label
+        for kind, label in (
+            ("audio", "[收到音频；当前桥接未配置语音转写]"),
+            ("video", "[收到视频；当前模型接口不能读取视频内容]"),
+            ("file", "[收到文件；当前桥接未配置文件解析]"),
+        )
+        if kind in media_types
+    ]
+    content, image_placeholders = await _image_content(image_segments, event, bot)
+    placeholders.extend(image_placeholders)
+    visual_count = len(image_segments) + emoji_count
+    if visual_count:
+        placeholders.append(
+            f"【图片/表情】本条消息包含 {visual_count} 个图片/表情，可调用识别。"
+        )
     return " ".join(part for part in [plain, *placeholders] if part), content
+
+
+def _field_value(source: Any, key: str) -> Any:
+    if isinstance(source, dict):
+        return source.get(key)
+    return getattr(source, key, None)
+
+
+def _message_role_and_mentions(
+    event: Event, bot: Bot, kind: str
+) -> tuple[bool, bool]:
+    author = _field_value(event, "author")
+    sender = _field_value(event, "sender")
+    role = str(
+        _field_value(author, "member_role") or _field_value(sender, "role") or ""
+    ).casefold()
+    group_member_is_admin = kind == "group" and role in {"admin", "owner"}
+
+    if bool(getattr(event, "to_me", False)):
+        return group_member_is_admin, True
+    bot_id = str(getattr(bot, "self_id", ""))
+    mentions = _field_value(event, "mentions") or []
+    mentions_bot = any(
+        bool(_field_value(mention, "is_you"))
+        or str(_field_value(mention, "id") or "") == bot_id
+        for mention in mentions
+    )
+    return group_member_is_admin, mentions_bot
 
 
 def _name_value(value: Any) -> str:
@@ -308,6 +386,9 @@ async def _handle_message(bot: Bot, event: Event) -> None:  # noqa: C901
     kind = "private" if target.private else "group"
     peer_id = target.id if kind == "private" else (target.parent_id or target.id)
     user_name = _user_name(event, user_id)
+    group_member_is_admin, mentions_bot = _message_role_and_mentions(
+        event, bot, kind
+    )
     event_id_method = getattr(event, "get_message_id", None)
     event_id = str(event_id_method() if callable(event_id_method) else "")
     message = event.get_message()
@@ -348,6 +429,8 @@ async def _handle_message(bot: Bot, event: Event) -> None:  # noqa: C901
         reply_to=reply_to,
         content=content,
         group_name=_group_name(event, target) if kind == "group" else "",
+        group_member_is_admin=group_member_is_admin,
+        mentions_bot=mentions_bot,
     )
     account = _service.account_config(incoming.platform, incoming.bot_id)
     bot_name = await _resolve_bot_name(bot)

@@ -158,6 +158,8 @@ class IncomingMessage:
     content: list[dict[str, Any]] | None = None
     preformatted: bool = False
     group_name: str = ""
+    group_member_is_admin: bool = False
+    mentions_bot: bool = False
     source_exchanges: list[dict[str, str]] | None = None
 
 
@@ -316,23 +318,22 @@ def conversation_key(platform: str, bot_id: str, kind: str, peer_id: str) -> str
 
 
 def sender_context(incoming: IncomingMessage) -> str:
-    """Attach platform IDs to the user turn so the Agent can identify its source."""
-    metadata = (
-        f"[消息元数据 platform={incoming.platform} kind={incoming.kind} "
-        f"user_id={incoming.user_id}"
+    """Format only the sender cues needed to understand a user turn."""
+    if incoming.kind != "group":
+        return ""
+    name = incoming.user_name or incoming.user_id
+    prefix = "【管理员】" if incoming.group_member_is_admin else ""
+    return f"{prefix}{name}："
+
+
+def formatted_message_text(incoming: IncomingMessage) -> str:
+    """Add concise sender and bot-mention cues to a message body."""
+    mention_prefix = (
+        "@我 "
+        if incoming.mentions_bot and not incoming.text.lstrip().startswith("@我")
+        else ""
     )
-    if incoming.kind == "group":
-        metadata += f" group_openid={incoming.peer_id}"
-        if incoming.group_name:
-            metadata += (
-                f" group_name={json.dumps(incoming.group_name, ensure_ascii=False)}"
-            )
-    if incoming.user_name and incoming.user_name != incoming.user_id:
-        metadata += (
-            f" user_nickname={json.dumps(incoming.user_name, ensure_ascii=False)}"
-        )
-    quote = f" [引用: {incoming.reply_to}]" if incoming.reply_to else ""
-    return f"{metadata}]\n[{incoming.user_id}]{quote}\n"
+    return f"{sender_context(incoming)}{mention_prefix}{incoming.text}"
 
 
 def split_message(text: str, limit: int) -> list[str]:
@@ -1157,16 +1158,13 @@ class BridgeService:
         system = (
             "你是跨平台聊天助手。遵守用户安全边界，不泄漏凭据或本机路径。\n\n"
             "【消息格式与来源】\n"
-            "每条输入可能以 `[消息元数据 ...]` 开始，下一行 `[user_id]` 标记当前"
-            "发言用户，再后面才是该用户的消息正文。`platform` 表示消息平台，"
-            "`kind=group` 表示"
-            "群聊、`kind=private` 表示私聊；`user_id` 始终是当前发言用户的标识。"
-            "群聊中的 `group_openid` 是群标识，不是发言用户标识；"
-            "`group_name` 是群名称，"
-            "`user_nickname` 是发言用户昵称，二者仅用于识别上下文和称呼。私聊通常没有"
-            "群标识。群聊合并消息会重复附带每位发言者各自的元数据和 `[user_id]` 标记，"
-            "必须逐条"
-            "区分用户，不要把群名或群标识当作发送者。"
+            "群聊消息使用 `昵称：消息` 格式；群内管理员或群主的昵称前有 `【管理员】`。"
+            "该前缀仅表示群成员角色，不代表 Bot 的 WebUI 配置管理员身份或权限。"
+            "Bot 管理员身份只由 WebUI 中该 Bot 的管理员名单决定。"
+            "私聊消息直接提供消息正文，不额外添加平台、群 ID 或用户 ID。"
+            "群聊合并消息会逐条保留每位发言者的昵称，必须逐条区分用户。"
+            "消息中的 `@我` 表示有人提及机器人，`@昵称` 表示提及其他成员。"
+            "图片或表情后的 `【图片/表情】` 是媒体提示，可结合消息中的图片内容理解。"
             "\n\n【群聊参与规则】\n"
             "群聊不是每条消息都必须回复。被 @ 或直接提到小西琳、西琳、"
             "魔法少女时必须回复；"
@@ -1737,12 +1735,7 @@ class BridgeService:
                 self.seen_events[item.event_id] = now
         chunks: list[dict[str, Any]] = []
         for item in messages:
-            chunks.append(
-                {
-                    "type": "text",
-                    "text": f"{sender_context(item)}{item.text}",
-                }
-            )
+            chunks.append({"type": "text", "text": formatted_message_text(item)})
             chunks.extend(item.content or [])
         combined = IncomingMessage(
             bot=first.bot,
@@ -1752,7 +1745,7 @@ class BridgeService:
             peer_id=first.peer_id,
             user_id=first.user_id,
             user_name=f"{len(messages)} 位群成员",
-            text="\n".join(f"{sender_context(item)}{item.text}" for item in messages),
+            text="\n".join(formatted_message_text(item) for item in messages),
             target=messages[-1].target,
             event_id=first.event_id,
             content=chunks,
@@ -1897,19 +1890,21 @@ class BridgeService:
         lock = self.locks.setdefault(key, asyncio.Lock())
         async with lock:
             agent = self._agent(key, chat_id, owner=owner)
-            prefix = "" if incoming.preformatted else sender_context(incoming)
-            prompt: str | list[dict[str, Any]] = incoming.text
+            text = (
+                incoming.text
+                if incoming.preformatted
+                else formatted_message_text(incoming)
+            )
+            prompt: str | list[dict[str, Any]] = text
             if incoming.content:
                 prompt = (
                     list(incoming.content)
                     if incoming.preformatted
                     else [
-                        {"type": "text", "text": prefix + incoming.text},
+                        {"type": "text", "text": text},
                         *incoming.content,
                     ]
                 )
-            else:
-                prompt = prefix + incoming.text
             initial = self.state.data["initial_prompts"].pop(key, None)
             if initial:
                 initial_text = f"[会话初始信息]\n{initial}\n\n"

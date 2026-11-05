@@ -95,6 +95,37 @@ class BridgeServiceTests(unittest.TestCase):
         self.assertFalse(self.service.is_allowed("group", "room-2", "member", "test", "bot"))
         self.assertTrue(self.service.is_allowed("group", "room-2", "owner", "test", "bot"))
 
+    def test_group_member_admin_does_not_grant_webui_admin_access(self) -> None:
+        incoming = IncomingMessage(
+            bot=None,
+            platform="test",
+            bot_id="bot",
+            kind="group",
+            peer_id="unlisted-room",
+            user_id="group-admin",
+            user_name="Group Admin",
+            text="hello",
+            target=Target("unlisted-room"),
+            group_member_is_admin=True,
+        )
+
+        self.assertFalse(
+            self.service.is_admin(
+                incoming.user_id, None, incoming.platform, incoming.bot_id
+            )
+        )
+        self.assertTrue(self.service.is_admin("owner", None, "test", "bot"))
+        self.assertFalse(
+            self.service.is_allowed(
+                incoming.kind,
+                incoming.peer_id,
+                incoming.user_id,
+                incoming.platform,
+                incoming.bot_id,
+            )
+        )
+        self.assertEqual("【管理员】Group Admin：", sender_context(incoming))
+
     def test_private_target_id_can_identify_owner(self) -> None:
         self.service.state.data["accounts"].append(
             {
@@ -533,7 +564,7 @@ class BridgeServiceTests(unittest.TestCase):
         self.assertFalse(restored.reserve_outbound("group-a", now=100))
         self.assertTrue(restored.reserve_outbound("group-a", now=160.01))
 
-    def test_sender_context_includes_group_and_speaker_ids(self) -> None:
+    def test_sender_context_uses_concise_group_sender_and_admin_prefix(self) -> None:
         incoming = IncomingMessage(
             bot=None,
             platform="QQ",
@@ -544,23 +575,21 @@ class BridgeServiceTests(unittest.TestCase):
             user_name="Alice Example",
             text="hello",
             target=Target("group-openid"),
-            reply_to="message-1",
             group_name="Research Group",
+            group_member_is_admin=True,
         )
-        context = sender_context(incoming)
-        self.assertIn("group_openid=group-openid", context)
-        self.assertIn("user_id=member-openid", context)
-        self.assertIn('group_name="Research Group"', context)
-        self.assertIn('user_nickname="Alice Example"', context)
-        self.assertIn("\n[member-openid]", context)
-        self.assertIn("引用: message-1", context)
+        self.assertEqual("【管理员】Alice Example：", sender_context(incoming))
 
-    def test_bridge_agent_system_prompt_explains_group_and_sender_metadata(self) -> None:
+        incoming.kind = "private"
+        self.assertEqual("", sender_context(incoming))
+
+    def test_bridge_agent_system_prompt_explains_concise_sender_and_mentions(self) -> None:
         key, chat_id = self.service.resolve_chat("test", "bot", "group", "room-1")
         agent = self.service._agent(key, chat_id, owner=False)
         prompt = agent._build_system_prompt()
-        self.assertIn("`user_id` 始终是当前发言用户", prompt)
-        self.assertIn("`group_openid` 是群标识，不是发言用户标识", prompt)
+        self.assertIn("群聊消息使用 `昵称：消息` 格式", prompt)
+        self.assertIn("不代表 Bot 的 WebUI 配置管理员身份", prompt)
+        self.assertIn("`@我` 表示有人提及机器人", prompt)
         self.assertIn("逐条区分用户", prompt)
         self.assertIn("不是每条消息都必须回复", prompt)
         self.assertIn("[SILENT]", prompt)
@@ -667,9 +696,10 @@ class BridgeServiceTests(unittest.TestCase):
                 self.fail("Agent processing was not called")
             combined = call.args[0]
             self.assertTrue(combined.preformatted)
-            self.assertIn("user_id=member-1", combined.text)
-            self.assertIn("user_id=member-2", combined.text)
-            self.assertIn("group_openid=group-openid", combined.text)
+            self.assertIn("member-1：hello", combined.text)
+            self.assertIn("member-2：world", combined.text)
+            self.assertNotIn("user_id=", combined.text)
+            self.assertNotIn("group_openid=", combined.text)
 
         asyncio.run(run_test())
 
