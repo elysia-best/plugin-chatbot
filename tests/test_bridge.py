@@ -149,10 +149,10 @@ class BridgeServiceTests(unittest.TestCase):
             "qq", "bot", "private", "qq-private-openid"
         )
         self.assertEqual(
-            "已进入静默模式。",
+            "当前没有待审批操作。",
             self.service.command(
                 "different-event-openid",
-                "/silent",
+                "/approve yes",
                 key,
                 chat_id,
                 peer_id="qq-private-openid",
@@ -888,12 +888,20 @@ class BridgeServiceTests(unittest.TestCase):
         key, chat_id = self.service.resolve_chat("test", "bot", "private", "owner")
         self.assertEqual(
             "无权执行管理命令。",
-            self.service.command("member", "/silent", key, chat_id),
+            self.service.command("member", "/reply 0.5", key, chat_id),
         )
         self.assertEqual(
-            "已进入静默模式。", self.service.command("owner", "/silent", key, chat_id)
+            "回复概率只对群聊生效。",
+            self.service.command("owner", "/reply 0.5", key, chat_id),
         )
-        self.assertTrue(self.service.state.data["silent"])
+        group_key, group_chat = self.service.resolve_chat(
+            "test", "bot", "group", "room-1"
+        )
+        self.assertEqual(
+            "回复概率已设为 0.5。",
+            self.service.command("owner", "/reply 0.5", group_key, group_chat),
+        )
+        self.assertEqual(0.5, self.service.reply_probability_for_key(group_key))
         result = self.service.command("member", "/reset", key, chat_id)
         self.assertIsNotNone(result)
         self.assertIn("当前会话上下文已重置", result or "")

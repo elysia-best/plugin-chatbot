@@ -6,6 +6,8 @@ import asyncio
 import contextlib
 import hashlib
 import json
+import math
+import random
 import re
 import time
 from dataclasses import dataclass
@@ -44,6 +46,11 @@ MAX_MEME_RESULTS = 12
 MEMORY_RETRY_BASE_SECONDS = 60
 MEMORY_RETRY_MAX_SECONDS = 900
 MAX_MEMORY_OUTPUT_CHARS = 100_000
+DEFAULT_REPLY_PROBABILITY = 1.0
+PENDING_MAX_CHARS = 2000
+PENDING_MAX_ROWS = 100
+PENDING_RECENT_LIMIT = 3
+PENDING_TIMESTAMP_FORMAT = "%Y-%m-%d %H:%M:%S"
 MEMORY_FIELDS = ("title", "description", "type", "content")
 MEMORY_WRAPPER_KEYS = ("memory", "memories", "result", "data", "items")
 MODEL_CONTEXT_KEYS = (
@@ -185,10 +192,10 @@ class BridgeState:
         self.data: dict[str, Any] = {
             "version": 1,
             "mode": "chat",
-            "silent": False,
             "role": None,
             "initial_prompts": {},
             "conversations": {},
+            "pending_messages": {},
             "activity": [],
             "usage": [],
             "slang": [],
@@ -224,11 +231,13 @@ class BridgeState:
             ("initial_prompts", {}),
             ("voice_sends", []),
             ("outbound_sends", {}),
+            ("pending_messages", {}),
             ("accounts", []),
             ("groups", []),
         ):
             if not isinstance(self.data.get(key), type(value)):
                 self.data[key] = value
+        self.data.pop("silent", None)
         interfaces = self.data.get("interfaces")
         if not isinstance(interfaces, dict):
             interfaces = {}
@@ -275,6 +284,11 @@ class BridgeState:
             if not isinstance(group, dict):
                 continue
             group.setdefault("enabled_tools", None)
+            group.pop("reply_frequency", None)
+            probability = normalize_probability(group.get("reply_probability"))
+            group["reply_probability"] = (
+                DEFAULT_REPLY_PROBABILITY if probability is None else probability
+            )
             if not group.get("name_source"):
                 group["name_source"] = (
                     "fallback"
@@ -346,6 +360,29 @@ def formatted_message_text(incoming: IncomingMessage) -> str:
         else ""
     )
     return f"{sender_context(incoming)}{mention_prefix}{incoming.text}"
+
+
+def normalize_probability(value: Any) -> float | None:
+    """Return a finite probability in [0, 1], or ``None`` for invalid input."""
+    try:
+        probability = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if not math.isfinite(probability) or not 0.0 <= probability <= 1.0:
+        return None
+    return probability
+
+
+def pending_lines(rows: list[dict[str, Any]]) -> str:
+    """Join buffered messages without timestamps for logging and slang windows."""
+    return "\n".join(str(row.get("text") or "") for row in rows)
+
+
+def timestamped_lines(rows: list[dict[str, Any]]) -> str:
+    """Join buffered messages with an explicit timestamp on every line."""
+    return "\n".join(
+        f"[{row.get('at') or ''}] {row.get('text') or ''}" for row in rows
+    )
 
 
 def split_message(text: str, limit: int) -> list[str]:
@@ -633,6 +670,64 @@ class BridgeService:
             ):
                 return group
         return None
+
+    def reply_probability(self, incoming: IncomingMessage) -> float:
+        """Return the group's configured reply probability (1.0 by default)."""
+        if incoming.kind != "group":
+            return DEFAULT_REPLY_PROBABILITY
+        group = self.group_config(incoming.platform, incoming.bot_id, incoming.peer_id)
+        value = normalize_probability(group.get("reply_probability")) if group else None
+        return DEFAULT_REPLY_PROBABILITY if value is None else value
+
+    def reply_probability_for_key(self, key: str) -> float:
+        """Return the reply probability for a persisted conversation key."""
+        record = self.state.data["conversations"].get(key, {})
+        if str(record.get("kind") or "") != "group":
+            return DEFAULT_REPLY_PROBABILITY
+        group = self.group_config(
+            str(record.get("platform") or ""),
+            str(record.get("bot_id") or ""),
+            str(record.get("peer_id") or ""),
+        )
+        value = normalize_probability(group.get("reply_probability")) if group else None
+        return DEFAULT_REPLY_PROBABILITY if value is None else value
+
+    def _pending_rows(self, key: str) -> list[dict[str, Any]]:
+        """Return the live pending-message list for one conversation."""
+        rows = self.state.data["pending_messages"].get(key)
+        if not isinstance(rows, list):
+            rows = []
+            self.state.data["pending_messages"][key] = rows
+        rows[:] = [row for row in rows if isinstance(row, dict)]
+        return rows
+
+    def _clear_pending(self, key: str) -> None:
+        """Drop buffered messages after they have been delivered to the model."""
+        if self.state.data["pending_messages"].pop(key, None) is not None:
+            self.state.save()
+
+    def _ensure_group_config(self, record: dict[str, Any]) -> dict[str, Any]:
+        """Find or create the group policy addressed by a conversation record."""
+        platform = str(record.get("platform") or "")
+        bot_id = str(record.get("bot_id") or "")
+        peer_id = str(record.get("peer_id") or "")
+        group = self.group_config(platform, bot_id, peer_id)
+        if group is None:
+            group = {
+                "id": hashlib.sha256(
+                    f"{platform}:{bot_id}:{peer_id}".encode()
+                ).hexdigest()[:16],
+                "platform": platform,
+                "bot_id": bot_id,
+                "group_id": peer_id,
+                "name": peer_id,
+                "name_source": "fallback",
+                "enabled": True,
+                "reply_probability": DEFAULT_REPLY_PROBABILITY,
+                "enabled_tools": None,
+            }
+            self.state.data["groups"].append(group)
+        return group
 
     def effective_chat_config(  # noqa: C901
         self, platform: str, bot_id: str, kind: str, peer_id: str
@@ -1401,7 +1496,10 @@ class BridgeService:
     def chat_tools(self, key: str) -> list[Tool]:  # noqa: C901, PLR0915
         async def status(_args: dict[str, Any], _ctx: ToolContext) -> str:
             return json.dumps(
-                {"mode": self.state.data["mode"], "silent": self.state.data["silent"]},
+                {
+                    "mode": self.state.data["mode"],
+                    "reply_probability": self.reply_probability_for_key(key),
+                },
                 ensure_ascii=False,
             )
 
@@ -1910,7 +2008,82 @@ class BridgeService:
             except Exception as exc:  # noqa: BLE001
                 self.state.log(f"黑话提取失败：{type(exc).__name__}")
 
+    async def _handle_probabilistic_group(
+        self, incoming: IncomingMessage, probability: float
+    ) -> str:
+        """Buffer skipped messages and deliver them together on the next reply.
+
+        Args:
+            incoming: One raw group message.
+            probability: Configured reply probability in [0, 1).
+
+        Returns:
+            The bridge reply, or an empty string when this message is buffered.
+        """
+        key = conversation_key(
+            incoming.platform, incoming.bot_id, incoming.kind, incoming.peer_id
+        )
+        owner = self.is_admin(
+            incoming.user_id, None, incoming.platform, incoming.bot_id
+        )
+        stamp = (
+            datetime.fromtimestamp(time.time())
+            .astimezone()
+            .strftime(PENDING_TIMESTAMP_FORMAT)
+        )
+        pending = self._pending_rows(key)
+        if incoming.event_id and any(
+            row.get("event_id") == incoming.event_id for row in pending
+        ):
+            return ""
+        pending.append(
+            {
+                "at": stamp,
+                "text": formatted_message_text(incoming),
+                "event_id": incoming.event_id,
+            }
+        )
+        if (
+            len(timestamped_lines(pending)) > PENDING_MAX_CHARS
+            or len(pending) > PENDING_MAX_ROWS
+        ):
+            del pending[:-PENDING_RECENT_LIMIT]
+        self.state.save()
+        if not (probability > 0.0 and (owner or random.random() < probability)):
+            return ""
+        rows = list(pending)
+        content: list[dict[str, Any]] = [
+            {"type": "text", "text": timestamped_lines(rows)}
+        ]
+        content.extend(
+            block
+            for block in (incoming.content or [])
+            if block.get("type") in {"image_url", "input_image"}
+        )
+        merged = IncomingMessage(
+            bot=incoming.bot,
+            platform=incoming.platform,
+            bot_id=incoming.bot_id,
+            kind=incoming.kind,
+            peer_id=incoming.peer_id,
+            user_id=incoming.user_id,
+            user_name=incoming.user_name,
+            text=pending_lines(rows),
+            target=incoming.target,
+            event_id=incoming.event_id,
+            content=content,
+            preformatted=True,
+            group_name=incoming.group_name,
+            group_member_is_admin=incoming.group_member_is_admin,
+            mentions_bot=incoming.mentions_bot,
+        )
+        return await self._process_message(merged, pending_key=key)
+
     async def handle_message(self, incoming: IncomingMessage) -> str:
+        if incoming.kind == "group" and not incoming.text.startswith("/"):
+            probability = self.reply_probability(incoming)
+            if probability < DEFAULT_REPLY_PROBABILITY:
+                return await self._handle_probabilistic_group(incoming, probability)
         if (
             incoming.kind != "group"
             or incoming.text.startswith("/")
@@ -1981,7 +2154,7 @@ class BridgeService:
                 future.set_result(response if index == 0 else "")
 
     async def _process_message(  # noqa: C901, PLR0911, PLR0912, PLR0915
-        self, incoming: IncomingMessage
+        self, incoming: IncomingMessage, *, pending_key: str | None = None
     ) -> str:
         account = self.account_config(incoming.platform, incoming.bot_id)
         if account is not None and not bool(account.get("enabled", True)):
@@ -2060,12 +2233,6 @@ class BridgeService:
         for waiter in self.waiters.get(key, []):
             if not waiter.done():
                 waiter.set_result(incoming.text)
-        if self.state.data["silent"] and not owner:
-            self.state.log(
-                f"{incoming.platform}:{incoming.kind}:{incoming.peer_id} "
-                "静默期间收到消息"
-            )
-            return ""
         if incoming.text.startswith("/"):
             command_result = self.command(
                 incoming.user_id,
@@ -2144,6 +2311,8 @@ class BridgeService:
             if result.status == "error":
                 self.state.log(f"{key} 处理失败：{result.error or 'unknown'}")
                 return ""
+            if pending_key is not None:
+                self._clear_pending(pending_key)
             if result.text.strip() == "[SILENT]":
                 return ""
             problem = audit_reply(result.text)
@@ -2194,16 +2363,16 @@ class BridgeService:
             str(record.get("bot_id", "")),
         )
         if command == "/status":
-            silent = "是" if self.state.data["silent"] else "否"
-            return f"模式：{self.state.data['mode']}；静默：{silent}；会话：{chat_id}"
+            probability = self.reply_probability_for_key(key)
+            return (
+                f"模式：{self.state.data['mode']}；"
+                f"回复概率：{probability:g}；会话：{chat_id}"
+            )
         if command == "/reset":
             self.store.replace(chat_id, [])
             self.agents.pop(key, None)
             return "当前会话上下文已重置。"
-        if (
-            command in {"/role", "/silent", "/active", "/mode", "/approve"}
-            and not admin
-        ):
+        if command in {"/role", "/reply", "/mode", "/approve"} and not admin:
             return "无权执行管理命令。"
         if command == "/role":
             if not argument:
@@ -2221,14 +2390,18 @@ class BridgeService:
             self.state.save()
             self.agents.clear()
             return "角色已更新。"
-        if command == "/silent":
-            self.state.data["silent"] = True
+        if command == "/reply":
+            if str(record.get("kind") or "") != "group":
+                return "回复概率只对群聊生效。"
+            if not argument:
+                return f"当前回复概率：{self.reply_probability_for_key(key):g}"
+            value = normalize_probability(argument)
+            if value is None:
+                return "用法：/reply 0~1（0 永不回复，1 一直回复）"
+            group = self._ensure_group_config(record)
+            group["reply_probability"] = value
             self.state.save()
-            return "已进入静默模式。"
-        if command == "/active":
-            self.state.data["silent"] = False
-            self.state.save()
-            return "已恢复响应。"
+            return f"回复概率已设为 {value:g}。"
         if command == "/mode":
             if argument not in {"chat", "agent"}:
                 return "用法：/mode chat|agent"
@@ -2248,7 +2421,6 @@ class BridgeService:
     def snapshot(self) -> dict[str, Any]:
         return {
             "mode": self.state.data["mode"],
-            "silent": self.state.data["silent"],
             "role": self.state.data.get("active_role") or self.state.data.get("role"),
             "conversations": list(self.state.data["conversations"].values()),
             "activity": self.state.data["activity"][-100:],

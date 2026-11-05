@@ -21,8 +21,10 @@ from pydantic import BaseModel
 
 from plugin_chatbot.bridge import BridgeConfig, BridgeService
 from plugin_chatbot.bridge.service import (
+    DEFAULT_REPLY_PROBABILITY,
     IncomingMessage,
     normalize_model_records,
+    normalize_probability,
     positive_context_length,
 )
 
@@ -34,6 +36,7 @@ MAX_INITIAL_PROMPT_CHARS = 4000
 MAX_SLANG_TERM_CHARS = 100
 MAX_IMAGES_PER_MESSAGE = 8
 MAX_MCP_URL_CHARS = 2000
+MAX_TEMPERATURE = 2
 MESSAGE_LOG_PREVIEW_CHARS = 120
 
 
@@ -489,7 +492,7 @@ async def _handle_message(bot: Bot, event: Event) -> None:  # noqa: C901
                 "enabled": True,
                 "provider_id": "",
                 "system_prompt": "",
-                "reply_frequency": "balanced",
+                "reply_probability": DEFAULT_REPLY_PROBABILITY,
                 "reasoning_effort": "",
                 "model": "",
                 "cost_limit": None,
@@ -556,9 +559,21 @@ def _temperature_value(value: Any) -> float:
         temperature = float(value)
     except (TypeError, ValueError, OverflowError):
         raise HTTPException(status_code=422, detail="Invalid temperature") from None
-    if not math.isfinite(temperature) or not 0 <= temperature <= 2:
-        raise HTTPException(status_code=422, detail="Temperature must be between 0 and 2")
+    if not math.isfinite(temperature) or not 0 <= temperature <= MAX_TEMPERATURE:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Temperature must be between 0 and {MAX_TEMPERATURE}",
+        )
     return temperature
+
+
+def _probability_value(value: Any) -> float:
+    probability = normalize_probability(value)
+    if probability is None:
+        raise HTTPException(
+            status_code=422, detail="Reply probability must be between 0 and 1"
+        )
+    return probability
 
 
 @_api.get("/api/accounts", dependencies=[Depends(_authorize)])
@@ -692,7 +707,9 @@ async def _create_group(body: dict[str, Any]) -> dict[str, Any]:
         "enabled": bool(body.get("enabled", True)),
         "provider_id": str(body.get("provider_id") or ""),
         "system_prompt": str(body.get("system_prompt") or ""),
-        "reply_frequency": str(body.get("reply_frequency") or "balanced"),
+        "reply_probability": _probability_value(
+            body.get("reply_probability", DEFAULT_REPLY_PROBABILITY)
+        ),
         "reasoning_effort": str(body.get("reasoning_effort") or ""),
         "model": str(body.get("model") or ""),
         "cost_limit": body.get("cost_limit"),
@@ -722,7 +739,6 @@ async def _update_group(row_id: str, body: dict[str, Any]) -> dict[str, Any]:
         "enabled",
         "provider_id",
         "system_prompt",
-        "reply_frequency",
         "reasoning_effort",
         "model",
         "cost_limit",
@@ -731,6 +747,9 @@ async def _update_group(row_id: str, body: dict[str, Any]) -> dict[str, Any]:
     ):
         if key in body:
             row[key] = body[key]
+    if "reply_probability" in body:
+        row["reply_probability"] = _probability_value(body["reply_probability"])
+    row.pop("reply_frequency", None)
     if "name" in body:
         row["name_source"] = "manual" if str(body["name"]).strip() else "fallback"
     _service.state.save()
@@ -1062,13 +1081,6 @@ async def _set_session_tools(
         raise HTTPException(status_code=404, detail="Conversation not found") from exc
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-
-
-@_api.put("/api/silent", dependencies=[Depends(_authorize)])
-async def _set_silent(body: dict[str, bool]) -> dict[str, bool]:
-    _service.state.data["silent"] = bool(body.get("enabled", False))
-    _service.state.save()
-    return {"silent": _service.state.data["silent"]}
 
 
 @_api.put("/api/role", dependencies=[Depends(_authorize)])
