@@ -25,9 +25,11 @@ from plugin_chatbot.bridge.service import (
     audit_reply,
     conversation_key,
     extract_context_length,
+    is_silent_reply,
     normalize_model_records,
     sender_context,
     split_message,
+    strip_think_blocks,
 )
 
 
@@ -674,6 +676,101 @@ class BridgeServiceTests(unittest.TestCase):
 
         asyncio.run(run_test())
 
+    def _process_agent_text(self, text: str) -> str:
+        async def run_test() -> str:
+            usage = SimpleNamespace(
+                prompt_tokens=0, completion_tokens=0, total_tokens=0
+            )
+            result = SimpleNamespace(
+                status="success", text=text, usage=usage, tool_calls=[]
+            )
+            agent = SimpleNamespace(run=AsyncMock(return_value=result))
+            self.service._agent = cast("Any", lambda *_args, **_kwargs: agent)
+            incoming = IncomingMessage(
+                bot=None,
+                platform="test",
+                bot_id="bot",
+                kind="group",
+                peer_id="room-1",
+                user_id="member",
+                user_name="Member",
+                text="hello",
+                target=Target("room-1"),
+            )
+            return await self.service._process_message(incoming)
+
+        return asyncio.run(run_test())
+
+    def test_chat_mode_strips_think_blocks_before_sending(self) -> None:
+        reply = self._process_agent_text(
+            "<thinking>first</thinking>\n"
+            "<thinking>second</thinking>\n"
+            "<thinking>third</thinking>\n"
+            "同一天啊，那你得好好陪陪你妈，别只顾着刷群了"
+        )
+
+        self.assertEqual(
+            "同一天啊，那你得好好陪陪你妈，别只顾着刷群了", reply
+        )
+
+    def test_chat_mode_suppresses_silent_marker_after_think_blocks(self) -> None:
+        reply = self._process_agent_text(
+            "<thinking>first</thinking>\n"
+            "<thinking>second</thinking>\n"
+            "<thinking>third</thinking>\n"
+            "[SILENT]"
+        )
+
+        self.assertEqual("", reply)
+
+    def test_chat_mode_suppresses_reply_with_only_think_blocks(self) -> None:
+        reply = self._process_agent_text(
+            "<thinking>first</thinking>\n<thinking>second</thinking>"
+        )
+
+        self.assertEqual("", reply)
+
+    def _chat_send_tool(self) -> tuple[str, Any]:
+        key, _chat_id = self.service.resolve_chat("test", "bot", "group", "room-1")
+        self.service.targets[key] = Target("room-1")
+        self.service.bots[key] = object()
+        tool = next(
+            tool for tool in self.service.chat_tools(key) if tool.name == "chat_send"
+        )
+        return key, tool
+
+    def test_chat_send_strips_think_blocks_before_sending(self) -> None:
+        async def run_test() -> None:
+            key, tool = self._chat_send_tool()
+            with patch.object(
+                self.service, "send_text", AsyncMock(return_value=True)
+            ) as send_text:
+                result = await tool.call(
+                    {"text": "<thinking>hidden</thinking>\n可见正文"},
+                    ToolContext(workspace=self.temp.name),
+                )
+
+            self.assertEqual("Message sent", result)
+            send_text.assert_awaited_once_with(key, "可见正文", reply_to=None)
+
+        asyncio.run(run_test())
+
+    def test_chat_send_suppresses_silent_marker_after_think_blocks(self) -> None:
+        async def run_test() -> None:
+            _key, tool = self._chat_send_tool()
+            with patch.object(
+                self.service, "send_text", AsyncMock(return_value=True)
+            ) as send_text:
+                result = await tool.call(
+                    {"text": "<thinking>hidden</thinking>\n[SILENT]"},
+                    ToolContext(workspace=self.temp.name),
+                )
+
+            self.assertIn("suppressed", result)
+            send_text.assert_not_awaited()
+
+        asyncio.run(run_test())
+
     def test_group_messages_in_batch_share_one_agent_request(self) -> None:
         async def run_test() -> None:
             self.service.config.group_batch_seconds = 0.01
@@ -915,6 +1012,61 @@ class BridgeServiceTests(unittest.TestCase):
         result = self.service.command("member", "/reset", key, chat_id)
         self.assertIsNotNone(result)
         self.assertIn("当前会话上下文已重置", result or "")
+
+
+class ReplyCleaningTests(unittest.TestCase):
+    def test_strip_think_blocks_removes_consecutive_blocks(self) -> None:
+        text = (
+            "<thinking>first</thinking>\n"
+            "<thinking>second</thinking>\n"
+            "<thinking>third</thinking>\n"
+            "同一天啊，那你得好好陪陪你妈，别只顾着刷群了"
+        )
+
+        self.assertEqual(
+            "\n\n\n同一天啊，那你得好好陪陪你妈，别只顾着刷群了",
+            strip_think_blocks(text),
+        )
+
+    def test_strip_think_blocks_handles_case_and_attributes(self) -> None:
+        text = (
+            '<THINKING type="inner">hidden</THINKING>\n'
+            "<Think>secret</Think>\n"
+            "可见正文"
+        )
+
+        self.assertEqual("\n\n可见正文", strip_think_blocks(text))
+
+    def test_strip_think_blocks_discards_unclosed_block(self) -> None:
+        self.assertEqual("可见正文", strip_think_blocks("可见正文<thinking>截断的思考"))
+
+    def test_strip_think_blocks_removes_stray_closing_tag(self) -> None:
+        self.assertEqual("正文", strip_think_blocks("正文</thinking>"))
+
+    def test_is_silent_reply_recognizes_case_insensitive_marker(self) -> None:
+        self.assertTrue(is_silent_reply("[SILENT]"))
+        self.assertTrue(is_silent_reply("[silent]"))
+        self.assertTrue(is_silent_reply("[Silent]"))
+
+    def test_is_silent_reply_ignores_marker_inside_think_block(self) -> None:
+        visible = strip_think_blocks("<thinking>[SILENT]</thinking>")
+
+        self.assertEqual("", visible)
+        self.assertFalse(is_silent_reply(visible))
+
+    def test_is_silent_reply_detects_marker_after_think_blocks(self) -> None:
+        visible = strip_think_blocks(
+            "<thinking>first</thinking><thinking>second</thinking>\n[SILENT]"
+        )
+
+        self.assertTrue(is_silent_reply(visible))
+
+    def test_is_silent_reply_false_for_normal_reply_after_think_blocks(self) -> None:
+        visible = strip_think_blocks(
+            "<thinking>first</thinking>\n同一天啊，那你得好好陪陪你妈"
+        )
+
+        self.assertFalse(is_silent_reply(visible))
 
 
 if __name__ == "__main__":

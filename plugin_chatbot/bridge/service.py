@@ -77,6 +77,19 @@ _SECRET_RE = re.compile(
 _LOCAL_PATH_RE = re.compile(
     r'(?i)(?:\b[a-z]:\\[^\s<>"|?*]+|/(?:home|users|private|var|etc)/[^\s]+)'
 )
+_THINK_BLOCK_RE = re.compile(
+    r"<(?P<tag>think(?:ing)?)\b[^>]*>.*?</(?P=tag)\s*>",
+    re.IGNORECASE | re.DOTALL,
+)
+_THINK_UNCLOSED_RE = re.compile(
+    r"<think(?:ing)?\b[^>]*>.*\Z",
+    re.IGNORECASE | re.DOTALL,
+)
+_THINK_CLOSE_RE = re.compile(
+    r"</think(?:ing)?\s*>",
+    re.IGNORECASE,
+)
+_SILENT_RE = re.compile(r"\[SILENT\]", re.IGNORECASE)
 
 
 def positive_context_length(value: Any) -> int | None:
@@ -419,6 +432,24 @@ def timestamped_lines(rows: list[dict[str, Any]]) -> str:
     return "\n".join(
         f"[{row.get('at') or ''}] {row.get('text') or ''}" for row in rows
     )
+
+
+def strip_think_blocks(text: str) -> str:
+    """Remove model reasoning blocks before a reply reaches chat members.
+
+    Paired ``<think>`` / ``<thinking>`` blocks are dropped, an unclosed opening
+    tag discards everything after it, and stray closing tags are removed.
+    """
+    if not text:
+        return ""
+    cleaned = _THINK_BLOCK_RE.sub("", text)
+    cleaned = _THINK_UNCLOSED_RE.sub("", cleaned)
+    return _THINK_CLOSE_RE.sub("", cleaned)
+
+
+def is_silent_reply(text: str) -> bool:
+    """Return True when the model chose not to reply via the [SILENT] marker."""
+    return bool(_SILENT_RE.search(text))
 
 
 def split_message(text: str, limit: int) -> list[str]:
@@ -1562,9 +1593,11 @@ class BridgeService:
             )
 
         async def send(args: dict[str, Any], _ctx: ToolContext) -> str:
-            text = str(args.get("text", "")).strip()
+            text = strip_think_blocks(str(args.get("text", ""))).strip()
             if not text:
-                return "Error: text is required"
+                return "Error: reply suppressed (empty after removing reasoning)"
+            if is_silent_reply(text):
+                return "Error: reply suppressed ([SILENT])"
             problem = audit_reply(text)
             if problem:
                 return f"Error: blocked by safety audit ({problem})"
@@ -2085,7 +2118,7 @@ class BridgeService:
         )
         try:
             result = await agent.run(prompt)
-            return result.text
+            return strip_think_blocks(result.text)
         finally:
             await agent.close()
 
@@ -2464,16 +2497,17 @@ class BridgeService:
             finally:
                 self.current_images.pop(key, None)
             self._record_usage(key, result.usage)
+            visible = strip_think_blocks(result.text).strip()
             if result.status == "completed" and account is not None:
                 await self._record_memory_exchange(
-                    account, incoming, result.text, agent._llm
+                    account, incoming, visible, agent._llm
                 )
             if result.status == "error":
                 self.state.log(f"{key} 处理失败：{result.error or 'unknown'}")
                 return ""
-            if result.text.strip() == "[SILENT]":
+            if not visible or is_silent_reply(visible):
                 return ""
-            problem = audit_reply(result.text)
+            problem = audit_reply(visible)
             if problem:
                 self.state.log(f"{key} 回复被安全审计拦截：{problem}")
                 return "回复被安全策略拦截。"
@@ -2481,7 +2515,7 @@ class BridgeService:
                 call.name == "chat_send" and call.allowed and not call.is_error
                 for call in result.tool_calls
             ):
-                return result.text
+                return visible
             return ""
 
     def _record_usage(self, key: str, usage: Any) -> None:
