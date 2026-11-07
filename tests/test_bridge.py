@@ -639,7 +639,9 @@ class BridgeServiceTests(unittest.TestCase):
                 target=Target("room-1"),
             )
 
-            self.assertEqual("", await self.service._process_message(incoming))
+            with patch("plugin_chatbot.bridge.service.logger.error") as log_error:
+                self.assertEqual("", await self.service._process_message(incoming))
+
             self.assertTrue(
                 any(
                     "处理失败：Error code: 503 - Service temporarily unavailable"
@@ -647,6 +649,8 @@ class BridgeServiceTests(unittest.TestCase):
                     for entry in self.service.state.data["activity"]
                 )
             )
+            log_error.assert_called_once()
+            self.assertIn("Chat request failed", log_error.call_args.args[0])
             agent.run.assert_awaited_once()
 
         asyncio.run(run_test())

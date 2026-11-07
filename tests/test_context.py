@@ -87,8 +87,37 @@ class BodyOnlyServiceUnavailableLLM:
     async def complete(self, messages, tools=None, system_prompt=None):
         self.calls += 1
         if self.calls == 1:
-            raise BodyOnlyServiceUnavailable()
+            raise BodyOnlyServiceUnavailable
         return LLMResponse(content="recovered from 503")
+
+
+class AlwaysUnavailableLLM:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def complete(self, messages, tools=None, system_prompt=None):
+        self.calls += 1
+        raise RuntimeError("Error code: 503 - Service temporarily unavailable")
+
+
+class RecoverAfterSixAttemptsLLM:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def complete(self, messages, tools=None, system_prompt=None):
+        self.calls += 1
+        if self.calls < 6:
+            raise RuntimeError("Error code: 503 - Service temporarily unavailable")
+        return LLMResponse(content="recovered after several attempts")
+
+
+class PermanentFailureLLM:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def complete(self, messages, tools=None, system_prompt=None):
+        self.calls += 1
+        raise RuntimeError("Error code: 401 - invalid api key")
 
 
 class RateLimitLLM:
@@ -157,6 +186,63 @@ class ContextCompactionTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual("completed", result.status)
             self.assertEqual("recovered from 503", result.text)
             self.assertEqual(2, llm.calls)
+
+    async def test_transient_failure_retries_until_recovered(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            agent = Agent(model="test", workspace=temp)
+            llm = RecoverAfterSixAttemptsLLM()
+            agent._llm = llm
+            delays = []
+
+            async def capture_delay(seconds: float) -> None:
+                delays.append(seconds)
+
+            with patch("agent.core.asyncio.sleep", side_effect=capture_delay):
+                result = await agent.run("hello")
+
+            self.assertEqual("completed", result.status)
+            self.assertEqual("recovered after several attempts", result.text)
+            self.assertEqual(6, llm.calls)
+            self.assertEqual([0.5, 1.0, 2.0, 4.0, 8.0], delays)
+
+    async def test_transient_failure_is_discarded_at_30_second_deadline(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            agent = Agent(model="test", workspace=temp)
+            llm = AlwaysUnavailableLLM()
+            agent._llm = llm
+            now = 100.0
+            delays = []
+
+            def monotonic() -> float:
+                return now
+
+            async def advance(seconds: float) -> None:
+                nonlocal now
+                delays.append(seconds)
+                now += seconds
+
+            with (
+                patch("agent.core.time.monotonic", side_effect=monotonic),
+                patch("agent.core.asyncio.sleep", side_effect=advance),
+            ):
+                result = await agent.run("hello")
+
+            self.assertEqual("error", result.status)
+            self.assertIn("Service temporarily unavailable", result.error or "")
+            self.assertEqual(6, llm.calls)
+            self.assertEqual([0.5, 1.0, 2.0, 4.0, 8.0, 14.5], delays)
+            self.assertAlmostEqual(30.0, sum(delays))
+
+    async def test_permanent_provider_error_is_not_retried(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            agent = Agent(model="test", workspace=temp)
+            llm = PermanentFailureLLM()
+            agent._llm = llm
+
+            result = await agent.run("hello")
+
+            self.assertEqual("error", result.status)
+            self.assertEqual(1, llm.calls)
 
     async def test_tpm_rpm_rate_limit_retries_with_backoff(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

@@ -16,6 +16,7 @@ import asyncio
 import contextlib
 import hashlib
 import json
+import time
 import uuid
 from collections.abc import Coroutine
 from dataclasses import dataclass, field
@@ -53,7 +54,7 @@ _SUMMARY_RESERVE_TOKENS = 1024  # 为摘要响应预留的 token
 _MESSAGE_TOKEN_DIVISOR = 8  # 单条消息裁剪上限 = 历史预算 // 8
 _TRUNCATE_MARK = "\n...[truncated]...\n"
 _INTERRUPTED_TOOL_RESULT = "Error: tool call interrupted"
-_TRANSIENT_RETRY_ATTEMPTS = 5
+_TRANSIENT_RETRY_WINDOW_SECONDS = 30.0
 _TRANSIENT_RETRY_BASE_SECONDS = 0.5
 _RATE_LIMIT_RETRY_BASE_SECONDS = 2.0
 _MAX_RETRY_AFTER_SECONDS = 60.0
@@ -1088,24 +1089,45 @@ class Agent:
         tools: list[Tool],
         system_prompt: str,
     ) -> LLMResponse:
-        for attempt in range(_TRANSIENT_RETRY_ATTEMPTS):
+        async def complete_once() -> tuple[LLMResponse | None, Exception | None]:
             try:
-                return await self._llm.complete(
-                    history, tools=tools, system_prompt=system_prompt
+                return (
+                    await self._llm.complete(
+                        history, tools=tools, system_prompt=system_prompt
+                    ),
+                    None,
                 )
-            except Exception as exc:
-                is_rate_limited = _is_rate_limit_error(exc)
-                if (
-                    attempt + 1 >= _TRANSIENT_RETRY_ATTEMPTS
-                    or not is_rate_limited
-                    and not _is_transient_provider_error(exc)
-                ):
-                    raise
-                if is_rate_limited:
-                    await asyncio.sleep(_retry_after_seconds(exc, attempt))
-                else:
-                    await asyncio.sleep(_TRANSIENT_RETRY_BASE_SECONDS * (2**attempt))
-        raise RuntimeError("LLM retry loop exited unexpectedly")
+            except Exception as exc:  # noqa: BLE001
+                return None, exc
+
+        deadline: float | None = None
+        attempt = 0
+        while True:
+            response, error = await complete_once()
+            if error is None:
+                assert response is not None
+                return response
+
+            is_rate_limited = _is_rate_limit_error(error)
+            if not is_rate_limited and not _is_transient_provider_error(error):
+                raise error
+
+            now = time.monotonic()
+            if deadline is None:
+                deadline = now + _TRANSIENT_RETRY_WINDOW_SECONDS
+            remaining = deadline - now
+            if remaining <= 0:
+                raise error
+
+            delay = (
+                _retry_after_seconds(error, attempt)
+                if is_rate_limited
+                else _TRANSIENT_RETRY_BASE_SECONDS * (2**attempt)
+            )
+            await asyncio.sleep(min(delay, remaining))
+            if time.monotonic() >= deadline:
+                raise error
+            attempt += 1
 
     def _context_fingerprint(self) -> str:
         payload = {

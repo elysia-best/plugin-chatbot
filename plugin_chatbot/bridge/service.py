@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Literal, cast
 
+from nonebot import logger
 from nonebot_plugin_alconna import Target, UniMessage
 
 from agent import Agent, PermissionRule, SessionStore, Tool, ToolContext
@@ -2503,7 +2504,11 @@ class BridgeService:
                     account, incoming, visible, agent._llm
                 )
             if result.status == "error":
-                self.state.log(f"{key} 处理失败：{result.error or 'unknown'}")
+                error = _error_detail(result.error or "unknown")
+                logger.error(
+                    "Chat request failed: conversation={} error={}", key, error
+                )
+                self.state.log(f"{key} 处理失败：{error}")
                 return ""
             if not visible or is_silent_reply(visible):
                 return ""
