@@ -56,16 +56,22 @@ class Tool:
         }
 
     def extract_path(self, args: dict[str, Any]) -> str | None:
-        if self.path_field and self.path_field in args:
-            return str(args[self.path_field])
+        # An explicit path_field is authoritative: None means "guess from the
+        # usual argument names", "" means "this tool has no path argument".
+        if self.path_field is not None:
+            if self.path_field and self.path_field in args:
+                return str(args[self.path_field])
+            return None
         for k in ("file_path", "path", "pattern"):
             if k in args:
                 return str(args[k])
         return None
 
     def extract_command(self, args: dict[str, Any]) -> str | None:
-        if self.command_field and self.command_field in args:
-            return str(args[self.command_field])
+        if self.command_field is not None:
+            if self.command_field and self.command_field in args:
+                return str(args[self.command_field])
+            return None
         if "command" in args:
             return str(args["command"])
         return None

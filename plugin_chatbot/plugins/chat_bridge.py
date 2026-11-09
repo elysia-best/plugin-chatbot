@@ -20,6 +20,13 @@ from nonebot_plugin_alconna import Image, Target, UniMessage, get_target, image_
 from pydantic import BaseModel
 
 from plugin_chatbot.bridge import BridgeConfig, BridgeService
+from plugin_chatbot.bridge.custom_tools import (
+    DEFAULT_TIMEOUT,
+    MAX_SOURCE_CHARS,
+    MAX_TIMEOUT,
+    MIN_TIMEOUT,
+    CustomToolError,
+)
 from plugin_chatbot.bridge.memes import (
     MemeAnnotation,
     decode_image_data_url,
@@ -891,6 +898,93 @@ async def _discover_provider_models(row_id: str) -> dict[str, Any]:
 @_api.get("/api/tools", dependencies=[Depends(_authorize)])
 async def _tools() -> list[dict[str, Any]]:
     return _service.tool_catalog()
+
+
+def _custom_tool_http_error(exc: CustomToolError) -> HTTPException:
+    return HTTPException(status_code=exc.status, detail=exc.message)
+
+
+def _custom_tool_run_request(body: dict[str, Any]) -> tuple[dict[str, Any], float]:
+    raw_timeout = body.get("timeout")
+    timeout = DEFAULT_TIMEOUT
+    if isinstance(raw_timeout, (int, float)) and not isinstance(raw_timeout, bool):
+        timeout = float(raw_timeout)
+    timeout = min(max(timeout, MIN_TIMEOUT), MAX_TIMEOUT)
+    raw_args = body.get("args")
+    return (raw_args if isinstance(raw_args, dict) else {}), timeout
+
+
+@_api.get("/api/custom-tools", dependencies=[Depends(_authorize)])
+async def _custom_tools() -> list[dict[str, Any]]:
+    return _service.custom_tool_rows()
+
+
+@_api.post("/api/custom-tools", dependencies=[Depends(_authorize)])
+async def _create_custom_tool(body: dict[str, Any]) -> dict[str, Any]:
+    try:
+        return _service.create_custom_tool(body)
+    except CustomToolError as exc:
+        raise _custom_tool_http_error(exc) from exc
+
+
+@_api.post("/api/custom-tools/test", dependencies=[Depends(_authorize)])
+async def _test_custom_tool_draft(body: dict[str, Any]) -> dict[str, Any]:
+    source = body.get("source")
+    if not isinstance(source, str) or not source.strip():
+        raise HTTPException(status_code=422, detail="脚本内容不能为空")
+    if len(source) > MAX_SOURCE_CHARS:
+        raise HTTPException(status_code=422, detail="脚本超过字符上限")
+    args, timeout = _custom_tool_run_request(body)
+    return await _service.run_custom_tool(
+        source=source,
+        name=str(body.get("name") or "custom_draft"),
+        args=args,
+        timeout=timeout,
+    )
+
+
+@_api.get("/api/custom-tools/{tool_id}", dependencies=[Depends(_authorize)])
+async def _custom_tool_detail(tool_id: str) -> dict[str, Any]:
+    try:
+        return _service.custom_tool_detail(tool_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Custom tool not found") from exc
+
+
+@_api.put("/api/custom-tools/{tool_id}", dependencies=[Depends(_authorize)])
+async def _update_custom_tool(tool_id: str, body: dict[str, Any]) -> dict[str, Any]:
+    try:
+        return _service.update_custom_tool(tool_id, body)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Custom tool not found") from exc
+    except CustomToolError as exc:
+        raise _custom_tool_http_error(exc) from exc
+
+
+@_api.delete("/api/custom-tools/{tool_id}", dependencies=[Depends(_authorize)])
+async def _delete_custom_tool(tool_id: str) -> dict[str, bool]:
+    return {"deleted": _service.delete_custom_tool(tool_id)}
+
+
+@_api.post("/api/custom-tools/{tool_id}/test", dependencies=[Depends(_authorize)])
+async def _test_custom_tool(tool_id: str, body: dict[str, Any]) -> dict[str, Any]:
+    try:
+        row = _service.custom_tool_detail(tool_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Custom tool not found") from exc
+    source = row.get("source")
+    if not source:
+        raise HTTPException(
+            status_code=409,
+            detail=row.get("error") or "脚本文件不可用",
+        )
+    args, timeout = _custom_tool_run_request(body)
+    return await _service.run_custom_tool(
+        source=str(source),
+        name=str(row.get("name") or "custom_tool"),
+        args=args,
+        timeout=timeout,
+    )
 
 
 @_api.get("/api/status", dependencies=[Depends(_authorize)])

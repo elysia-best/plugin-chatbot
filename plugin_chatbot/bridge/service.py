@@ -9,9 +9,11 @@ import json
 import math
 import random
 import re
+import secrets
 import time
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 from nonebot import logger
@@ -23,6 +25,17 @@ from agent.memory import MEMORY_TYPES, ProjectMemoryStore, project_memory_tools
 from agent.messages import Message
 from agent.tools import builtin_tools
 
+from .custom_tools import (
+    DEFAULT_SCOPE,
+    DEFAULT_TIMEOUT,
+    CustomToolError,
+    CustomToolStore,
+    build_tool,
+    execute,
+    normalize_row,
+    source_digest,
+    validate_definition,
+)
 from .memes import (
     MemeLibrary,
     decode_image_data_url,
@@ -42,7 +55,6 @@ from .voice import VoiceLibrary
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
-    from pathlib import Path
 
 Mode = Literal["chat", "agent"]
 EVENT_TTL_SECONDS = 300
@@ -233,6 +245,7 @@ class BridgeState:
             "outbound_sends": {},
             "accounts": [],
             "groups": [],
+            "custom_tools": [],
             "interfaces": {
                 "providers": [],
                 "skills": [],
@@ -261,9 +274,11 @@ class BridgeState:
             ("pending_messages", {}),
             ("accounts", []),
             ("groups", []),
+            ("custom_tools", []),
         ):
             if not isinstance(self.data.get(key), type(value)):
                 self.data[key] = value
+        self.data["custom_tools"] = self._normalize_custom_tools()
         self.data.pop("silent", None)
         interfaces = self.data.get("interfaces")
         if not isinstance(interfaces, dict):
@@ -359,6 +374,15 @@ class BridgeState:
             json.dumps(self.data, ensure_ascii=False, indent=2), encoding="utf-8"
         )
         temp.replace(self.path)
+
+    def _normalize_custom_tools(self) -> list[dict[str, Any]]:
+        """Drop unusable rows and keep the first tool per name."""
+        rows: dict[str, dict[str, Any]] = {}
+        for item in self.data["custom_tools"]:
+            row = normalize_row(item) if isinstance(item, dict) else None
+            if row is not None:
+                rows.setdefault(str(row["name"]), row)
+        return list(rows.values())
 
     def log(self, text: str) -> None:
         rows = self.data["activity"]
@@ -653,6 +677,7 @@ class BridgeService:
             max_text_chars=config.voice_max_text_chars,
         )
         self.memes = MemeLibrary(config.state_dir / "memes", config.max_media_bytes)
+        self._init_custom_tools()
         self.current_images: dict[str, list[dict[str, Any]]] = {}
         self.slang_windows: dict[str, list[dict[str, str]]] = {}
         self.slang_tasks: set[asyncio.Task[None]] = set()
@@ -664,6 +689,20 @@ class BridgeService:
             str, list[tuple[IncomingMessage, asyncio.Future[str]]]
         ] = {}
         self.group_batch_tasks: dict[str, asyncio.Task[None]] = {}
+
+    def _init_custom_tools(self) -> None:
+        self.custom_tools = CustomToolStore(self.config.state_dir / "custom_tools")
+        self.custom_tool_runner = Path(__file__).with_name("custom_tool_runner.py")
+        self.custom_tool_cache: dict[str, tuple[float, str]] = {}
+        self.custom_tool_warned: set[str] = set()
+        self.custom_tool_slots = asyncio.Semaphore(2)
+        if not self.custom_tool_runner.is_file():
+            logger.error("Custom tool runner is missing: {}", self.custom_tool_runner)
+        pruned = self.custom_tools.prune(
+            {str(row["id"]) for row in self.state.data["custom_tools"]}
+        )
+        if pruned:
+            logger.info("Removed {} orphaned custom tool script(s)", pruned)
 
     @staticmethod
     def _access_ids(entries: Any, kind: str | None = None) -> set[str]:
@@ -1114,6 +1153,248 @@ class BridgeService:
         self.state.save()
         return record
 
+    # ---------------------------------------------------------------- custom tools
+
+    def _custom_tool_row(self, tool_id: str) -> dict[str, Any]:
+        for row in self.state.data["custom_tools"]:
+            if str(row.get("id")) == tool_id:
+                return row
+        raise KeyError(tool_id)
+
+    def _reserved_tool_names(self) -> set[str]:
+        names = {tool.name for tool in builtin_tools()}
+        names.update(tool.name for tool in self.chat_tools(""))
+        names.update(tool.name for tool in self._mcp_tools())
+        names.update({"ProjectMemoryRead", "ProjectMemoryWrite"})
+        return names
+
+    def custom_tool_names(self) -> set[str]:
+        """Names of enabled custom tools, regardless of audience."""
+        return {
+            str(row["name"])
+            for row in self.state.data["custom_tools"]
+            if row.get("enabled", True)
+        }
+
+    def custom_tool_source(self, row: dict[str, Any]) -> str:
+        """Read a script and verify it still matches the registered digest."""
+        tool_id = str(row["id"])
+        path = self.custom_tools.path(tool_id)
+        stamp = path.stat().st_mtime
+        cached = self.custom_tool_cache.get(tool_id)
+        if cached is not None and cached[0] == stamp:
+            source = cached[1]
+        else:
+            source = path.read_text(encoding="utf-8")
+            self.custom_tool_cache[tool_id] = (stamp, source)
+        expected = str(row.get("source_sha256") or "")
+        if expected and source_digest(source) != expected:
+            message = f"脚本文件与登记指纹不符：{row['name']}"
+            raise CustomToolError(message, 409)
+        return source
+
+    def _warn_custom_tool(self, key: str, message: str) -> None:
+        """Log a loading problem once per process instead of once per message."""
+        if key in self.custom_tool_warned:
+            return
+        self.custom_tool_warned.add(key)
+        self.state.log(f"自定义工具：{message}")
+
+    def custom_tools_for(self, key: str) -> list[Tool]:
+        """Custom tools visible in this conversation under the current scope."""
+        rows = self.state.data["custom_tools"]
+        if not rows or not self.custom_tool_runner.is_file():
+            return []
+        record = self.state.data["conversations"].get(key) or {}
+        private = record.get("kind") == "private"
+        is_admin = private and self.conversation_is_admin(key)
+        mode = self.state.data["mode"]
+        reserved = self._reserved_tool_names()
+        result: list[Tool] = []
+        for row in rows:
+            if not row.get("enabled", True):
+                continue
+            scope = str(row.get("scope") or DEFAULT_SCOPE)
+            if scope == "admin" and not (mode == "agent" and is_admin):
+                continue
+            if scope == "private" and not private:
+                continue
+            name = str(row["name"])
+            if name in reserved:
+                self._warn_custom_tool(name, f"{name} 与内置工具同名，已跳过")
+                continue
+            try:
+                source = self.custom_tool_source(row)
+            except (OSError, CustomToolError) as exc:
+                self._warn_custom_tool(str(row["id"]), f"{name} 加载失败：{exc}")
+                continue
+            timeout = float(row.get("timeout") or DEFAULT_TIMEOUT)
+
+            async def invoke(
+                args: dict[str, Any],
+                _ctx: ToolContext,
+                *,
+                _source: str = source,
+                _name: str = name,
+                _timeout: float = timeout,
+            ) -> dict[str, Any]:
+                return await self.run_custom_tool(
+                    source=_source,
+                    name=_name,
+                    args=args,
+                    timeout=_timeout,
+                    record=True,
+                )
+
+            result.append(build_tool(row, invoke))
+        return result
+
+    async def run_custom_tool(
+        self,
+        *,
+        source: str,
+        name: str,
+        args: dict[str, Any],
+        timeout: float,
+        record: bool = False,
+    ) -> dict[str, Any]:
+        if not self.custom_tool_runner.is_file():
+            return {
+                "ok": False,
+                "output": "",
+                "error": "运行时文件缺失，自定义工具不可用",
+                "traceback": "",
+                "logs": [],
+                "commands": 0,
+                "truncated": False,
+                "elapsed_ms": 0,
+            }
+        async with self.custom_tool_slots:
+            result = await execute(
+                runner=self.custom_tool_runner,
+                workspace=self.config.workspace,
+                source=source,
+                name=name,
+                args=args,
+                timeout=timeout,
+            )
+        if record:
+            state = "成功" if result.get("ok") else "失败"
+            reason = result.get("error") or "未知错误"
+            detail = "" if result.get("ok") else f"：{reason}"
+            self.state.log(
+                f"自定义工具 {name} 执行{state}，"
+                f"耗时 {result.get('elapsed_ms', 0)}ms{detail}"
+            )
+        return result
+
+    def _custom_tool_public(self, row: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "id": row["id"],
+            "name": row["name"],
+            "description": row.get("description", ""),
+            "input_schema": row.get("input_schema", {}),
+            "scope": row.get("scope", DEFAULT_SCOPE),
+            "timeout": row.get("timeout", DEFAULT_TIMEOUT),
+            "enabled": bool(row.get("enabled", True)),
+            "updated_at": row.get("updated_at", 0),
+        }
+
+    def custom_tool_rows(self) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        for row in self.state.data["custom_tools"]:
+            item = self._custom_tool_public(row)
+            status = "ok"
+            source_chars = 0
+            try:
+                source_chars = len(self.custom_tool_source(row))
+            except (OSError, CustomToolError):
+                status = "invalid"
+            item["source_chars"] = source_chars
+            item["status"] = status
+            rows.append(item)
+        return rows
+
+    def custom_tool_detail(self, tool_id: str) -> dict[str, Any]:
+        row = self._custom_tool_row(tool_id)
+        item = self._custom_tool_public(row)
+        item["status"] = "ok"
+        item["error"] = ""
+        try:
+            item["source"] = self.custom_tool_source(row)
+        except (OSError, CustomToolError) as exc:
+            item["source"] = ""
+            item["status"] = "invalid"
+            item["error"] = str(exc)
+        return item
+
+    def create_custom_tool(self, body: dict[str, Any]) -> dict[str, Any]:
+        existing = self.state.data["custom_tools"]
+        spec = validate_definition(body, existing=existing)
+        source = str(spec.pop("source"))
+        tool_id = secrets.token_hex(8)
+        digest = self.custom_tools.write(tool_id, source)
+        now = time.time()
+        row = {
+            "id": tool_id,
+            **spec,
+            "source_sha256": digest,
+            "created_at": now,
+            "updated_at": now,
+        }
+        existing.append(row)
+        self.state.save()
+        self.agents.clear()
+        return self.custom_tool_detail(tool_id)
+
+    def update_custom_tool(self, tool_id: str, body: dict[str, Any]) -> dict[str, Any]:
+        row = self._custom_tool_row(tool_id)
+        existing = self.state.data["custom_tools"]
+        merged: dict[str, Any] = {**row, **body}
+        if "source" not in body:
+            merged["source"] = self.custom_tools.read(tool_id)
+        spec = validate_definition(merged, existing=existing, current_id=tool_id)
+        source = str(spec.pop("source"))
+        previous = str(row["name"])
+        digest = self.custom_tools.write(tool_id, source)
+        row.update(spec)
+        row["source_sha256"] = digest
+        row["updated_at"] = time.time()
+        if previous != row["name"]:
+            self._rename_tool_references(previous, str(row["name"]))
+        self.custom_tool_cache.pop(tool_id, None)
+        self.state.save()
+        self.agents.clear()
+        return self.custom_tool_detail(tool_id)
+
+    def delete_custom_tool(self, tool_id: str) -> bool:
+        rows = self.state.data["custom_tools"]
+        kept = [row for row in rows if str(row.get("id")) != tool_id]
+        if len(kept) == len(rows):
+            return False
+        self.state.data["custom_tools"] = kept
+        self.custom_tools.delete(tool_id)
+        self.custom_tool_cache.pop(tool_id, None)
+        self.state.save()
+        self.agents.clear()
+        return True
+
+    def _rename_tool_references(self, previous: str, current: str) -> None:
+        containers: list[dict[str, Any]] = [
+            *self.state.data["accounts"],
+            *self.state.data["groups"],
+            *self.state.data["conversations"].values(),
+        ]
+        for container in containers:
+            if not isinstance(container, dict):
+                continue
+            names = container.get("enabled_tools")
+            if not isinstance(names, list) or previous not in names:
+                continue
+            container["enabled_tools"] = [
+                current if name == previous else name for name in names
+            ]
+
     def available_session_tools(self, key: str) -> list[Tool]:
         record = self.state.data["conversations"].get(key)
         if record is None:
@@ -1134,6 +1415,7 @@ class BridgeService:
             )
         elif self.state.data["mode"] == "chat" and not mcp_search_available:
             tools.extend(tool for tool in builtin_tools() if tool.name == "WebSearch")
+        tools.extend(self.custom_tools_for(key))
         tools.extend(project_memory_tools(self.memories))
         tools.extend(self._mcp_tools())
         return tools
@@ -1184,6 +1466,25 @@ class BridgeService:
                     "available": True,
                     "admin_only": admin_only,
                     "source": "mcp" if tool.name.startswith("mcp__") else "builtin",
+                }
+            )
+        for row in self.state.data["custom_tools"]:
+            if not row.get("enabled", True):
+                continue
+            if self.state.data["mode"] != "agent" and row.get("scope") == "admin":
+                continue
+            name = str(row["name"])
+            if name in seen:
+                continue
+            seen.add(name)
+            result.append(
+                {
+                    "name": name,
+                    "description": str(row.get("description") or ""),
+                    "category": "exec",
+                    "available": True,
+                    "admin_only": row.get("scope") != "all",
+                    "source": "custom",
                 }
             )
         return result
@@ -1566,6 +1867,7 @@ class BridgeService:
         )
         tools = [tool for tool in available_tools if tool.name in enabled_names]
         builtin_names = {tool.name for tool in builtin_tools()}
+        custom_names = self.custom_tool_names()
         permissions = [
             PermissionRule(tool=tool.name, behavior="allow")
             for tool in tools
@@ -1574,6 +1876,7 @@ class BridgeService:
                 or tool.name == "WebSearch"
                 or tool.name.startswith("mcp__open_websearch__")
                 or (owner and tool.name in builtin_names)
+                or tool.name in custom_names
             )
         ]
         if any(tool.name == "ProjectMemoryRead" for tool in tools):
