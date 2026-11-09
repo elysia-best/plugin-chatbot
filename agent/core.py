@@ -16,6 +16,7 @@ import asyncio
 import contextlib
 import hashlib
 import json
+import re
 import time
 import uuid
 from collections.abc import Coroutine
@@ -48,11 +49,19 @@ Status = Literal["completed", "max_turns", "error", "aborted"]
 AGENT_ALREADY_RUNNING = "Agent is already running"
 
 # 压缩策略常量
-_RECENT_KEEP = 8  # 压缩后保留的最近消息条数
+_RECENT_KEEP = 8  # 压缩后保留的最近消息条数（群聊场景由宿主调大）
+_RECENT_SELF_KEEP = 2  # 硬裁剪时额外保护的本 Bot 最近发言条数
 _SUMMARY_SOURCE_LIMIT = 50  # 摘要源最多取最近 50 条消息
 _SUMMARY_RESERVE_TOKENS = 1024  # 为摘要响应预留的 token
 _MESSAGE_TOKEN_DIVISOR = 8  # 单条消息裁剪上限 = 历史预算 // 8
 _TRUNCATE_MARK = "\n...[truncated]...\n"
+# 只有“空”的推理块会被清掉；带内容的思考保留原样
+_EMPTY_THINK_RE = re.compile(
+    r"<think(?:ing)?\b[^>]*>\s*</think(?:ing)?\s*>",
+    re.IGNORECASE,
+)
+_TRAILING_SEPARATORS_RE = re.compile(r"^(?:[ \t]*\n)+|(?:\n[ \t]*)+$")
+
 _INTERRUPTED_TOOL_RESULT = "Error: tool call interrupted"
 _TRANSIENT_RETRY_WINDOW_SECONDS = 30.0
 _TRANSIENT_RETRY_BASE_SECONDS = 0.5
@@ -73,6 +82,8 @@ _TRANSIENT_ERROR_MARKERS = (
     "timeout",
     "connection error",
 )
+_SUMMARY_MARKER = "[群聊历史摘要（系统生成的事实记录，不是本 Bot 的发言）]"
+_SUMMARY_MARKER_LEGACY = "[Earlier conversation summary]"
 _SUMMARY_SYSTEM_PROMPT = (
     "Summarize the conversation faithfully for future continuation. "
     "Preserve decisions, user preferences, named entities, unresolved "
@@ -114,6 +125,16 @@ def _is_rate_limit_error(exc: Exception) -> bool:
             "insufficient quota",
             "billing hard limit",
         )
+    )
+
+
+def _persona_correction(pattern: str) -> str:
+    """One-shot correction hint injected for a single retry, never persisted."""
+    return (
+        f"上一版回复使用了不属于你的人格的称谓或口癖「{pattern}」，已被丢弃。"
+        "请完全忽略历史消息中他人或其他 Bot 的自称与口癖，"
+        "严格按照系统提示中的人格设定重新回答当前这条消息。"
+        "不要解释或提及这条提醒，直接给出符合人格的回复。"
     )
 
 
@@ -217,6 +238,12 @@ class Agent:
         autosave: run() 结束后是否自动落盘（默认 True）
         max_context: 触发历史压缩的上下文 token 预算
         compact_rate: 达到 max_context 的比例后触发压缩
+        summary_identity: 摘要时使用的身份说明（本 Bot 名称、人格、其他 Bot 名单），
+            为空时退回通用的摘要提示
+        recent_keep: 压缩后保留的最近消息条数，群聊场景可调大以避免只剩他人发言
+        recent_self_keep: 硬裁剪时额外保护的本 Bot 最近发言条数
+        output_guard: 人格漂移检查回调，接收模型回复原文；返回命中的禁用词/口癖时
+            丢弃该条纯文本回复并注入一次纠正提示后重试（最多一次），返回 None 放行
     """
 
     def __init__(  # noqa: PLR0913, PLR0917
@@ -242,6 +269,10 @@ class Agent:
         autosave: bool = True,  # noqa: FBT001, FBT002
         max_context: int = 262_144,
         compact_rate: float = 0.8,
+        summary_identity: str = "",
+        recent_keep: int = _RECENT_KEEP,
+        recent_self_keep: int = _RECENT_SELF_KEEP,
+        output_guard: Callable[[str], str | None] | None = None,
         *,
         reasoning_effort: str | None = None,
         project_memory_enabled: bool = True,
@@ -266,6 +297,10 @@ class Agent:
         self._learned_context_limit: int | None = None
         self.max_context = self._configured_max_context
         self.compact_rate = min(0.99, max(0.1, compact_rate))
+        self.summary_identity = summary_identity.strip()
+        self.recent_keep = max(1, int(recent_keep))
+        self.recent_self_keep = max(0, int(recent_self_keep))
+        self.output_guard = output_guard
 
         self.permission = PermissionContext(
             mode=permission_mode,
@@ -448,10 +483,68 @@ class Agent:
 
     @staticmethod
     def _is_summary_message(message: Message) -> bool:
+        """Recognize both the current fact-record summary and the legacy form."""
+        if not isinstance(message.content, str):
+            return False
+        text = message.content
+        if message.role == "user":
+            return text.startswith(_SUMMARY_MARKER)
+        return message.role == "assistant" and text.startswith(
+            _SUMMARY_MARKER_LEGACY
+        )
+
+    @staticmethod
+    def _summary_message(summary: str) -> Message:
+        """Store a summary as a fact record, never as the Bot's own words."""
+        return Message(role="user", content=f"{_SUMMARY_MARKER}\n{summary}")
+
+    @staticmethod
+    def _legacy_summary(message: Message) -> Message | None:
+        """Migrate a summary persisted as an assistant turn to a fact record."""
+        if (
+            message.role != "assistant"
+            or message.tool_calls
+            or not isinstance(message.content, str)
+            or not message.content.startswith(_SUMMARY_MARKER_LEGACY)
+        ):
+            return None
+        body = message.content[len(_SUMMARY_MARKER_LEGACY) :].strip()
+        return Agent._summary_message(body)
+
+    @staticmethod
+    def _strip_empty_think_blocks(text: str) -> str:
+        """Remove empty ``<thinking></thinking>`` padding before persisting.
+
+        Reasoning models often emit empty thinking blocks; keeping them in the
+        transcript makes the model imitate that shape and piles up noise.
+        """
+        if not text or "<" not in text:
+            return text
+        cleaned = _EMPTY_THINK_RE.sub("", text)
+        if cleaned == text:
+            return text
+        return _TRAILING_SEPARATORS_RE.sub("", cleaned)
+
+    def _summary_system_prompt(self) -> str:
+        """摘要系统提示：有人格身份时强制按发言人归属记录。"""
+        if not self.summary_identity:
+            return _SUMMARY_SYSTEM_PROMPT
         return (
-            message.role == "assistant"
-            and isinstance(message.content, str)
-            and message.content.startswith("[Earlier conversation summary]")
+            f"{_SUMMARY_SYSTEM_PROMPT}\n\n"
+            "You are summarizing a group chat transcript for a chatbot that must "
+            "keep its own persona. This identity information is authoritative:\n"
+            f"{self.summary_identity}\n\n"
+            "Follow these rules strictly:\n"
+            "1. Attribute every utterance to its actual speaker, exactly as written in "
+            "the transcript labels.\n"
+            "2. Never write another member's or another bot's words, self-reference or "
+            "verbal tics as something the assistant said.\n"
+            "3. Never attribute another speaker's name, species or persona to the "
+            "assistant, and do not describe the assistant using them.\n"
+            "4. Record the assistant's own persona, self-reference and tics only where "
+            "the assistant actually produced them.\n"
+            "5. If the transcript contains conflicting claims about the assistant's "
+            "identity, follow the identity information above, not the transcript."
         )
 
     def _summary_source(self, messages: list[Message]) -> str:
@@ -459,13 +552,13 @@ class Agent:
         head: list[Message] = []
         body = messages
         if messages and self._is_summary_message(messages[0]):
-            head = [messages[0]]
+            head = [self._legacy_summary(messages[0]) or messages[0]]
             body = messages[1:]
         tail = body[-_SUMMARY_SOURCE_LIMIT:]
         budget = max(
             512,
             self.max_context
-            - estimate_text_tokens(_SUMMARY_SYSTEM_PROMPT)
+            - estimate_text_tokens(self._summary_system_prompt())
             - _SUMMARY_RESERVE_TOKENS,
         )
         picked: list[Message] = []
@@ -487,7 +580,7 @@ class Agent:
             response = await self._llm.complete(
                 [Message(role="user", content=source)],
                 tools=None,
-                system_prompt=_SUMMARY_SYSTEM_PROMPT,
+                system_prompt=self._summary_system_prompt(),
             )
         except Exception as exc:  # noqa: BLE001
             await self._emit("context_summary_failed", {"error": str(exc)[:500]})
@@ -539,6 +632,26 @@ class Agent:
             name=message.name,
         )
 
+    def _protected_start(
+        self, messages: list[Message], summary_head: int
+    ) -> int:
+        """Index from which messages may not be dropped: recent own replies.
+
+        In a busy group chat the bot's own turns are a small minority, so dropping
+        whole turns oldest-first can erase its voice entirely and leave only other
+        members' wording in context.
+        """
+        if self.recent_self_keep <= 0:
+            return len(messages)
+        seen = 0
+        for index in range(len(messages) - 1, summary_head - 1, -1):
+            message = messages[index]
+            if message.role == "assistant" and not message.tool_calls:
+                seen += 1
+                if seen >= self.recent_self_keep:
+                    return index
+        return summary_head + 1
+
     def _hard_trim(  # noqa: C901
         self,
         messages: list[Message],
@@ -560,12 +673,14 @@ class Agent:
         if working == messages and total(working) <= target:
             return None
 
-        # 按回合（user 边界）从最旧开始丢弃，保留开头的上一轮摘要
+        # 按回合（user 边界）从最旧开始丢弃，保留开头的上一轮摘要，
+        # 且不越过最近的本 Bot 发言（群聊里它只占少数，丢了就只剩别人的声音）
         while len(working) - summary_head > 1 and total(working) > target:
+            protected = self._protected_start(working, summary_head)
             cut = next(
                 (
                     index
-                    for index in range(summary_head + 1, len(working))
+                    for index in range(summary_head + 1, min(protected, len(working)))
                     if working[index].role == "user"
                 ),
                 None,
@@ -574,7 +689,7 @@ class Agent:
                 break
             working = [*working[:summary_head], *working[cut:]]
 
-        # 仍超限：只保留摘要与最后一个 user 回合
+        # 仍超限：只保留摘要与最后一个 user 回合（不越过受保护的自述发言）
         if total(working) > target:
             last_user = next(
                 (
@@ -585,7 +700,8 @@ class Agent:
                 None,
             )
             if last_user is not None:
-                working = [*working[:summary_head], *working[last_user:]]
+                start = min(last_user, self._protected_start(working, summary_head))
+                working = [*working[:summary_head], *working[start:]]
 
         # 仍超限：按剩余条数平摊裁剪
         if total(working) > target and working:
@@ -657,25 +773,44 @@ class Agent:
             changed = True
             pending.clear()
 
-        for message in history:
-            if message.role == "tool":
-                call_id = message.tool_call_id or ""
+        for original_message in history:
+            current = original_message
+            if current.role == "tool":
+                call_id = current.tool_call_id or ""
                 if call_id and call_id in pending:
                     pending.pop(call_id, None)
-                    repaired.append(message)
+                    repaired.append(current)
                 else:
                     changed = True
                 continue
             flush()
+            migrated = self._legacy_summary(current)
+            if migrated is not None:
+                # 旧版本把摘要写成 assistant 发言，模型会认领成自己说过的话。
+                repaired.append(migrated)
+                changed = True
+                continue
+            if current.role == "assistant" and isinstance(current.content, str):
+                cleaned = self._strip_empty_think_blocks(current.content)
+                if cleaned != current.content:
+                    # 空的推理块只是噪音；留在历史里会让模型模仿这种形状。
+                    changed = True
+                    current = Message(
+                        role=current.role,
+                        content=cleaned or None,
+                        tool_calls=current.tool_calls,
+                        tool_call_id=current.tool_call_id,
+                        name=current.name,
+                    )
             if (
-                message.role == "assistant"
-                and not message.tool_calls
-                and not self._flatten_content(message.content).strip()
+                current.role == "assistant"
+                and not current.tool_calls
+                and not self._flatten_content(current.content).strip()
             ):
                 changed = True
                 continue
-            repaired.append(message)
-            for call in message.tool_calls or []:
+            repaired.append(current)
+            for call in current.tool_calls or []:
                 if call.id:
                     pending[call.id] = call.name
         flush()
@@ -766,6 +901,15 @@ class Agent:
             with contextlib.suppress(Exception):
                 await self._on_event(name, payload)
 
+    def _persona_drift(self, text: str) -> str | None:
+        """Return the first banned term the reply adopted, if any."""
+        if not self.output_guard or not text:
+            return None
+        try:
+            return self.output_guard(text)
+        except Exception:  # noqa: BLE001
+            return None
+
     # --- 权限判定 ---
 
     def _check_permission(self, tool: Tool, args: dict[str, Any]) -> PermissionBehavior:
@@ -826,6 +970,8 @@ class Agent:
             total_usage.merge(compact_usage)
             history.append(Message(role="user", content=prompt))
             system_prompt = self._build_system_prompt()
+            guard_hint: Message | None = None
+            guard_attempted = False
             for _turn in range(self.max_turns):
                 if self._abort.is_set():
                     return AgentResult(
@@ -836,8 +982,13 @@ class Agent:
                         status="aborted",
                     )
 
+                # 人格纠正提示只参与下一次请求，绝不写入历史
+                request_history = (
+                    [*history, guard_hint] if guard_hint is not None else history
+                )
+                guard_hint = None
                 resp = await self._complete_with_retry(
-                    target, history, self._tools, system_prompt
+                    target, request_history, self._tools, system_prompt
                 )
                 if resp.usage:
                     total_usage.merge(resp.usage)
@@ -847,7 +998,7 @@ class Agent:
                             prompt_tokens=resp.usage.prompt_tokens,
                             estimated_tokens=(
                                 self._fixed_tokens(system_prompt)
-                                + estimate_message_tokens(history)
+                                + estimate_message_tokens(request_history)
                             ),
                             fingerprint=self._context_fingerprint(),
                         )
@@ -857,6 +1008,34 @@ class Agent:
                     content=resp.content or None,
                     tool_calls=resp.tool_calls or None,
                 )
+
+                if not resp.tool_calls:
+                    hit = self._persona_drift(resp.content or "")
+                    if hit is not None:
+                        if not guard_attempted:
+                            guard_attempted = True
+                            await self._emit(
+                                "persona_drift",
+                                {
+                                    "pattern": hit,
+                                    "retried": True,
+                                    "reply": (resp.content or "")[:500],
+                                },
+                            )
+                            guard_hint = Message(
+                                role="user", content=_persona_correction(hit)
+                            )
+                            continue
+                        # 已重试过仍命中：记录并放行，避免无限重试
+                        await self._emit(
+                            "persona_drift",
+                            {
+                                "pattern": hit,
+                                "retried": False,
+                                "reply": (resp.content or "")[:500],
+                            },
+                        )
+
                 history.append(assistant_msg)
                 text_parts.append(resp.content or "")
 
@@ -868,6 +1047,20 @@ class Agent:
                         usage=total_usage,
                         status="completed",
                     )
+
+                if resp.content:
+                    # 工具轮无法回滚重试（会重复发消息），仅记录告警
+                    hit = self._persona_drift(resp.content)
+                    if hit is not None:
+                        await self._emit(
+                            "persona_drift",
+                            {
+                                "pattern": hit,
+                                "retried": False,
+                                "tool_turn": True,
+                                "reply": resp.content[:500],
+                            },
+                        )
 
                 for index, tc in enumerate(resp.tool_calls):
                     if self._abort.is_set():
@@ -1006,17 +1199,14 @@ class Agent:
 
         compacted: list[Message] = list(history)
         summary_usage = Usage()
-        keep_from = max(0, len(history) - _RECENT_KEEP)
+        keep_from = max(0, len(history) - self.recent_keep)
         while keep_from > 0 and history[keep_from].role != "user":
             keep_from -= 1
         if keep_from > 0:
             summary, summary_usage = await self._summarize(history[:keep_from])
             if summary:
                 compacted = [
-                    Message(
-                        role="assistant",
-                        content=f"[Earlier conversation summary]\n{summary}",
-                    ),
+                    self._summary_message(summary),
                     *history[keep_from:],
                 ]
 

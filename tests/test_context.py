@@ -521,7 +521,11 @@ class ContextCompactionTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(8192, agent.max_context)
             self.assertEqual(2, llm.main_calls)
             self.assertEqual(1, llm.summary_calls)
-            self.assertIn("[Earlier conversation summary]", agent.history()[0].content or "")
+            self.assertIn(
+                "[群聊历史摘要（系统生成的事实记录，不是本 Bot 的发言）]",
+                agent.history()[0].content or "",
+            )
+            self.assertEqual("user", agent.history()[0].role)
 
     async def test_repeated_overflow_returns_error_after_single_retry(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -704,6 +708,108 @@ class ContextCompactionTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual("c1", history[-1].tool_call_id)
             self.assertEqual("Error: tool call interrupted", history[-1].content)
 
+    async def test_is_summary_message_recognizes_legacy_and_fact_record(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            agent = Agent(model="test", workspace=temp, tools=[])
+            legacy = Message(
+                role="assistant",
+                content="[Earlier conversation summary]\nOLD",
+            )
+            current = Message(
+                role="user",
+                content="[群聊历史摘要（系统生成的事实记录，不是本 Bot 的发言）]\nNEW",
+            )
+            normal = Message(role="assistant", content="just a reply")
+
+            self.assertTrue(agent._is_summary_message(legacy))
+            self.assertTrue(agent._is_summary_message(current))
+            self.assertFalse(agent._is_summary_message(normal))
+
+    async def test_repair_transcript_migrates_legacy_summary_to_fact_record(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            agent = Agent(model="test", workspace=temp, tools=[])
+            history = [
+                Message(
+                    role="assistant",
+                    content="[Earlier conversation summary]\nPOLLUTED HISTOry",
+                ),
+                Message(role="user", content="hi"),
+            ]
+
+            changed = agent._repair_transcript(history)
+
+            self.assertTrue(changed)
+            self.assertEqual("user", history[0].role)
+            self.assertIn(
+                "[群聊历史摘要（系统生成的事实记录，不是本 Bot 的发言）]",
+                history[0].content or "",
+            )
+            self.assertIn("POLLUTED HISTOry", history[0].content or "")
+            self.assertNotIn("Earlier conversation summary", history[0].content or "")
+
+    async def test_repair_transcript_keeps_assistant_message_with_tool_calls(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            agent = Agent(model="test", workspace=temp, tools=[])
+            history = [
+                Message(
+                    role="assistant",
+                    content="[Earlier conversation summary]\nnot a summary turn",
+                    tool_calls=[ToolCall("c1", "chat_status", {})],
+                ),
+                Message(role="tool", content="ok", tool_call_id="c1"),
+            ]
+
+            agent._repair_transcript(history)
+
+            self.assertEqual("assistant", history[0].role)
+            self.assertTrue(history[0].tool_calls)
+
+    async def test_repair_transcript_strips_empty_think_blocks(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            agent = Agent(model="test", workspace=temp, tools=[])
+            history = [
+                Message(
+                    role="assistant",
+                    content="<thinking> </thinking>\n<thinking> </thinking>\n[早起]",
+                ),
+                Message(role="user", content="hi"),
+            ]
+
+            changed = agent._repair_transcript(history)
+
+            self.assertTrue(changed)
+            self.assertEqual("[早起]", history[0].content)
+
+    async def test_repair_transcript_keeps_non_empty_thinking(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            agent = Agent(model="test", workspace=temp, tools=[])
+            history = [
+                Message(
+                    role="assistant",
+                    content="<thinking>想一下</thinking>\n[早起]",
+                ),
+            ]
+
+            changed = agent._repair_transcript(history)
+
+            self.assertFalse(changed)
+            self.assertIn("想一下", history[0].content or "")
+
+    async def test_strip_empty_think_blocks_drops_padding_only(self) -> None:
+        self.assertEqual("正文", Agent._strip_empty_think_blocks("<thinking></thinking>正文"))
+        self.assertEqual(
+            "正文",
+            Agent._strip_empty_think_blocks(
+                "<thinking> </thinking>\n<THINKING>\n</THINKING>\n正文"
+            ),
+        )
+        self.assertEqual("", Agent._strip_empty_think_blocks("<thinking> </thinking>"))
+        self.assertEqual("纯文本", Agent._strip_empty_think_blocks("纯文本"))
+
     async def test_run_repairs_orphan_tool_calls_and_persists(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             store_root = Path(temp) / "sessions"
@@ -763,6 +869,92 @@ class ContextCompactionTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("OLD-FACTS", source)
             headers = [line for line in source.splitlines() if line.startswith("[")]
             self.assertLessEqual(len(headers), 51)
+
+    async def test_summary_prompt_carries_identity_when_configured(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            agent = Agent(
+                model="test",
+                workspace=temp,
+                tools=[],
+                summary_identity="本 Bot 的名字是「魔法鼓鼓鱼」。群里还有其他机器人：「深度摸鱼」。",
+            )
+            llm = CompactionLLM()
+            agent._llm = llm
+            chat_id = agent.new_chat()
+            agent.store.cache(chat_id).extend(_turns(10))
+
+            await agent._summarize(agent.history())
+
+            if not llm.calls:
+                self.fail("summarizer was not called")
+            _messages, system_prompt = llm.calls[-1]
+            self.assertIn("魔法鼓鼓鱼", system_prompt or "")
+            self.assertIn("深度摸鱼", system_prompt or "")
+            self.assertIn("Never write another member's", system_prompt or "")
+
+    async def test_summary_prompt_without_identity_stays_generic(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            agent = Agent(model="test", workspace=temp, tools=[])
+            prompt = agent._summary_system_prompt()
+            self.assertNotIn("Never write another member's", prompt)
+
+    async def test_recent_keep_is_configurable_per_agent(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            agent = Agent(model="test", workspace=temp, tools=[], recent_keep=24)
+            self.assertEqual(24, agent.recent_keep)
+            default_agent = Agent(model="test", workspace=temp, tools=[])
+            self.assertLess(default_agent.recent_keep, agent.recent_keep)
+
+    async def test_hard_trim_keeps_recent_own_replies(self) -> None:
+        """群聊里自己的发言很少，硬裁剪不能把它们全部丢掉。"""
+        with tempfile.TemporaryDirectory() as temp:
+            agent = Agent(
+                model="test",
+                workspace=temp,
+                tools=[],
+                recent_self_keep=1,
+            )
+            messages: list[Message] = [
+                Message(role="user", content=f"member {index} " + "x" * 500)
+                for index in range(40)
+            ]
+            messages.insert(
+                30, Message(role="assistant", content="OWN-VOICE " + "y" * 200)
+            )
+
+            trimmed = agent._hard_trim(messages, limit_tokens=2000)
+
+            if trimmed is None:
+                self.fail("hard trim should have shortened the transcript")
+            self.assertTrue(
+                any("OWN-VOICE" in str(message.content) for message in trimmed),
+                "the bot's own recent reply must survive hard trimming",
+            )
+
+    async def test_hard_trim_still_drops_own_replies_when_disabled(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            agent = Agent(
+                model="test",
+                workspace=temp,
+                tools=[],
+                recent_self_keep=0,
+            )
+            messages: list[Message] = [
+                Message(role="user", content="member 0 " + "x" * 500),
+                Message(role="assistant", content="OWN-VOICE " + "y" * 200),
+                *[
+                    Message(role="user", content=f"member {index} " + "x" * 500)
+                    for index in range(1, 40)
+                ],
+            ]
+
+            trimmed = agent._hard_trim(messages, limit_tokens=2000)
+
+            if trimmed is None:
+                self.fail("hard trim should have shortened the transcript")
+            self.assertFalse(
+                any("OWN-VOICE" in str(message.content) for message in trimmed)
+            )
 
     async def test_hard_trim_keeps_leading_summary(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

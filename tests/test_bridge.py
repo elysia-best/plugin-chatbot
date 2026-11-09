@@ -27,6 +27,7 @@ from plugin_chatbot.bridge.service import (
     extract_context_length,
     is_silent_reply,
     normalize_model_records,
+    normalize_persona_banned_terms,
     sender_context,
     split_message,
     strip_think_blocks,
@@ -774,6 +775,145 @@ class BridgeServiceTests(unittest.TestCase):
             send_text.assert_not_awaited()
 
         asyncio.run(run_test())
+
+    def test_persona_banned_terms_accept_console_text_and_lists(self) -> None:
+        self.assertEqual(
+            ["本鲸", "白饭"],
+            normalize_persona_banned_terms("本鲸\n白饭, 本鲸，"),
+        )
+        self.assertEqual(
+            ["本鲸", "白饭"], normalize_persona_banned_terms([" 本鲸 ", "白饭", ""])
+        )
+        self.assertEqual([], normalize_persona_banned_terms(None))
+        self.assertEqual([], normalize_persona_banned_terms(123))
+        self.assertEqual(["x" * 40], normalize_persona_banned_terms(["x" * 80]))
+        self.assertEqual(50, len(normalize_persona_banned_terms([f"t{i}" for i in range(80)])))
+
+    def test_persona_banned_terms_build_output_guard(self) -> None:
+        account = {
+            "persona_banned": ["本鲸", " 白饭 ", "", None, "本鲸"],
+        }
+        self.assertEqual(["本鲸", "白饭"], BridgeService.persona_banned_terms(account))
+        self.assertEqual([], BridgeService.persona_banned_terms(None))
+        # 归一化函数同时接受控制台文本，账号字段里出现字符串也不会被丢弃
+        self.assertEqual(
+            ["本鲸"], BridgeService.persona_banned_terms({"persona_banned": "本鲸"})
+        )
+        self.assertIsNone(BridgeService.persona_drift_guard([]))
+
+        guard = BridgeService.persona_drift_guard(["本鲸"])
+        if guard is None:
+            self.fail("guard should be built from a non-empty term list")
+        self.assertEqual("本鲸", guard("本鲸今天吃白饭"))
+        self.assertIsNone(guard("我是河豚"))
+
+    def test_agent_reads_persona_banned_from_account(self) -> None:
+        self.service.state.data["accounts"][0]["persona_banned"] = ["本鲸"]
+        key, chat_id = self.service.resolve_chat("test", "bot", "group", "room-1")
+        agent = self.service._agent(key, chat_id, owner=False)
+
+        self.assertIsNotNone(agent.output_guard)
+        if agent.output_guard is None:
+            return
+        self.assertEqual("本鲸", agent.output_guard("本鲸来啦"))
+        self.assertIsNone(agent.output_guard("我是河豚"))
+
+        # 更新后复用同一 agent 时也会刷新守卫
+        self.service.state.data["accounts"][0]["persona_banned"] = []
+        self.service._agent(key, chat_id, owner=False)
+        self.assertIsNone(agent.output_guard)
+
+    def test_persona_drift_event_is_written_to_activity_log(self) -> None:
+        async def run_test() -> None:
+            self.service.state.data["accounts"][0]["persona_banned"] = ["本鲸"]
+            key, chat_id = self.service.resolve_chat("test", "bot", "group", "room-1")
+            agent = self.service._agent(key, chat_id, owner=False)
+
+            async def fake_run(prompt: str, chat_id: str | None = None) -> Any:
+                callback = agent._on_event
+                if callback is not None:
+                    await callback(
+                        "persona_drift",
+                        {"pattern": "本鲸", "retried": True, "reply": "本鲸来了"},
+                    )
+                    await callback(
+                        "persona_drift",
+                        {"pattern": "白饭", "tool_turn": True, "reply": "白饭"},
+                    )
+                return SimpleNamespace(
+                    status="success",
+                    text="我是河豚",
+                    usage=SimpleNamespace(
+                        prompt_tokens=0, completion_tokens=0, total_tokens=0
+                    ),
+                    tool_calls=[],
+                )
+
+            agent.run = cast("Any", fake_run)
+            incoming = IncomingMessage(
+                bot=None,
+                platform="test",
+                bot_id="bot",
+                kind="group",
+                peer_id="room-1",
+                user_id="member",
+                user_name="Member",
+                text="你是谁",
+                target=Target("room-1"),
+            )
+
+            reply = await self.service._process_message(incoming)
+
+            self.assertEqual("我是河豚", reply)
+            texts = [
+                str(entry.get("text", ""))
+                for entry in self.service.state.data["activity"]
+            ]
+            self.assertTrue(
+                any("人格漂移" in text and "本鲸" in text for text in texts),
+                texts,
+            )
+            self.assertTrue(
+                any("工具轮" in text and "白饭" in text for text in texts),
+                texts,
+            )
+
+        asyncio.run(run_test())
+
+    def test_sender_context_marks_other_bots_separately_from_members(self) -> None:
+        incoming = IncomingMessage(
+            bot=None,
+            platform="QQ",
+            bot_id="bot",
+            kind="group",
+            peer_id="group-openid",
+            user_id="other-bot",
+            user_name="Whale Bot",
+            text="hello",
+            target=Target("group-openid"),
+            group_member_is_admin=True,
+            is_other_bot=True,
+        )
+        self.assertEqual("【管理员】【其他 Bot】Whale Bot：", sender_context(incoming))
+        incoming.group_member_is_admin = False
+        self.assertEqual("【其他 Bot】Whale Bot：", sender_context(incoming))
+
+    def test_other_bot_detection_uses_configured_accounts(self) -> None:
+        self.service.state.data["accounts"].append(
+            {
+                "id": "whale",
+                "platform": "test",
+                "bot_id": "whale-bot",
+                "name": "深度摸鱼",
+            }
+        )
+        self.assertEqual(
+            "深度摸鱼", self.service.other_bot_name("test", "bot", "whale-bot")
+        )
+        self.assertEqual("", self.service.other_bot_name("test", "bot", "bot"))
+        self.assertEqual("", self.service.other_bot_name("test", "bot", "member"))
+        self.assertEqual("", self.service.other_bot_name("other", "bot", "whale-bot"))
+        self.assertEqual(["深度摸鱼"], self.service.other_bot_names("test", "bot"))
 
     def test_group_messages_in_batch_share_one_agent_request(self) -> None:
         async def run_test() -> None:

@@ -37,6 +37,7 @@ from plugin_chatbot.bridge.service import (
     IncomingMessage,
     merge_slang_settings,
     normalize_model_records,
+    normalize_persona_banned_terms,
     normalize_probability,
     positive_context_length,
 )
@@ -448,6 +449,9 @@ async def _handle_message(bot: Bot, event: Event) -> None:  # noqa: C901
         group_member_is_admin=group_member_is_admin,
         mentions_bot=mentions_bot,
     )
+    incoming.is_other_bot = bool(
+        _service.other_bot_name(incoming.platform, incoming.bot_id, user_id)
+    )
     account = _service.account_config(incoming.platform, incoming.bot_id)
     bot_name = await _resolve_bot_name(bot)
     if account is None:
@@ -618,6 +622,7 @@ async def _create_account(body: dict[str, Any]) -> dict[str, Any]:
         "context_length": positive_context_length(body.get("context_length")),
         "persona_role": str(body.get("persona_role") or "") or None,
         "persona_prompt": str(body.get("persona_prompt") or ""),
+        "persona_banned": normalize_persona_banned_terms(body.get("persona_banned")),
         "enabled_tools": body.get("enabled_tools")
         if isinstance(body.get("enabled_tools"), list)
         else None,
@@ -662,6 +667,10 @@ async def _update_account(row_id: str, body: dict[str, Any]) -> dict[str, Any]:
             row[key] = body[key]
     if "temperature" in body:
         row["temperature"] = _temperature_value(body["temperature"])
+    if "persona_banned" in body:
+        row["persona_banned"] = normalize_persona_banned_terms(
+            body["persona_banned"]
+        )
     if "memory_interval" in body:
         row["memory_interval"] = _memory_interval(body["memory_interval"])
     if "memory_enabled" in body:

@@ -41,7 +41,7 @@ from .slang import (
 from .voice import VoiceLibrary
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Callable, Iterator
     from pathlib import Path
 
 Mode = Literal["chat", "agent"]
@@ -167,6 +167,7 @@ class BridgeConfig:
     group_batch_seconds: float = 1.0
     max_context: int = 262_144
     compact_rate: float = 0.8
+    recent_keep: int = 24
     max_media_bytes: int = 8 * 1024 * 1024
     console_token: str = ""
     role_dir: Path | None = None
@@ -204,6 +205,7 @@ class IncomingMessage:
     group_name: str = ""
     group_member_is_admin: bool = False
     mentions_bot: bool = False
+    is_other_bot: bool = False
     source_exchanges: list[dict[str, str]] | None = None
 
 
@@ -279,6 +281,9 @@ class BridgeState:
             account.pop("api_key", None)
             account.setdefault("persona_role", None)
             account.setdefault("persona_prompt", "")
+            account.setdefault("persona_banned", [])
+            if not isinstance(account.get("persona_banned"), list):
+                account["persona_banned"] = []
             account.setdefault("enabled_tools", None)
             account.setdefault("context_length", None)
             account.setdefault("provider_id", "")
@@ -368,13 +373,37 @@ def conversation_key(platform: str, bot_id: str, kind: str, peer_id: str) -> str
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
+def normalize_persona_banned_terms(value: Any) -> list[str]:
+    """Normalize banned self-reference / verbal-tic terms from any input shape.
+
+    Accepts a list or a human-typed string separated by newlines or commas, so
+    both the console form and the API can share one rule.
+    """
+    if isinstance(value, str):
+        raw_items: list[Any] = re.split(r"[\n,，、]+", value)
+    elif isinstance(value, list):
+        raw_items = list(value)
+    else:
+        return []
+    terms: list[str] = []
+    for item in raw_items:
+        term = str(item or "").strip()[:40]
+        if term and term not in terms:
+            terms.append(term)
+    return terms[:50]
+
+
 def sender_context(incoming: IncomingMessage) -> str:
     """Format only the sender cues needed to understand a user turn."""
     if incoming.kind != "group":
         return ""
     name = incoming.user_name or incoming.user_id
-    prefix = "【管理员】" if incoming.group_member_is_admin else ""
-    return f"{prefix}{name}："
+    tags = ""
+    if incoming.group_member_is_admin:
+        tags += "【管理员】"
+    if incoming.is_other_bot:
+        tags += "【其他 Bot】"
+    return f"{tags}{name}："
 
 
 def formatted_message_text(incoming: IncomingMessage) -> str:
@@ -718,6 +747,116 @@ class BridgeService:
         elif user_name and row.get("name") != user_name:
             row["name"] = user_name
         self.state.save()
+
+    def other_bot_name(self, platform: str, bot_id: str, user_id: str) -> str:
+        """Return the configured name of a *different* Bot account, else ``""``.
+
+        Used to mark messages that come from another chatbot in the same group,
+        so the model never adopts their persona or verbal tics as its own.
+        """
+        if not user_id or user_id == bot_id:
+            return ""
+        target_platform = platform.casefold()
+        for account in self.state.data.get("accounts", []):
+            if not isinstance(account, dict):
+                continue
+            if str(account.get("platform") or "").casefold() != target_platform:
+                continue
+            if str(account.get("bot_id") or "") != user_id:
+                continue
+            return str(account.get("name") or user_id)
+        return ""
+
+    def other_bot_names(self, platform: str, bot_id: str) -> list[str]:
+        """Return display names of the *other* Bot accounts on this platform."""
+        target_platform = platform.casefold()
+        names: list[str] = []
+        for account in self.state.data.get("accounts", []):
+            if not isinstance(account, dict):
+                continue
+            if str(account.get("platform") or "").casefold() != target_platform:
+                continue
+            peer_id = str(account.get("bot_id") or "")
+            if not peer_id or peer_id == bot_id:
+                continue
+            name = str(account.get("name") or "").strip() or peer_id
+            if name not in names:
+                names.append(name)
+        return names
+
+    def bot_self_names(
+        self, bot_name: str, account: dict[str, Any] | None
+    ) -> list[str]:
+        """Names that count as an explicit mention of this Bot.
+
+        Derived from the account display name and its selected persona template,
+        so no persona name is hard-coded in the bridge.
+        """
+        candidates = [bot_name]
+        if account is not None:
+            candidates.append(str(account.get("name") or ""))
+            role_name = account.get("persona_role") or self.state.data.get(
+                "active_role"
+            )
+            if role_name:
+                candidates.append(str(role_name))
+        names: list[str] = []
+        for candidate in candidates:
+            name = candidate.strip()
+            if not name or name.isdigit() or name in names:
+                continue
+            names.append(name)
+        return names or ["我"]
+
+    @staticmethod
+    def _summary_identity(
+        bot_name: str,
+        persona: Any,
+        other_bots: list[str],
+        *,
+        persona_limit: int = 2000,
+    ) -> str:
+        """Describe who this Bot is for the history-summary request.
+
+        The summarizer must know which voice in the transcript is the Bot's own,
+        otherwise it silently adopts another speaker's persona or tics.
+        """
+        parts = [f"本 Bot 在群聊中的名字是「{bot_name}」。"]
+        persona_text = str(persona or "").strip()
+        if persona_text:
+            parts.append(
+                "本 Bot 的人格提示（摘要时必须维持）：\n"
+                f"{persona_text[:persona_limit]}"
+            )
+        if other_bots:
+            parts.append(
+                "群里还有其他机器人："
+                + "、".join(f"「{name}」" for name in other_bots)
+                + "。它们的发言、自称、口癖和扮演的角色都属于它们自己，"
+                "摘要中必须按发言人归属记录，不得写成「助手」说过的话。"
+            )
+        return "\n".join(parts)
+
+    @staticmethod
+    def persona_banned_terms(account: dict[str, Any] | None) -> list[str]:
+        """Return the account's banned self-reference / verbal-tic terms."""
+        if account is None:
+            return []
+        return normalize_persona_banned_terms(account.get("persona_banned"))
+
+    @staticmethod
+    def persona_drift_guard(terms: list[str]) -> Callable[[str], str | None] | None:
+        """Build an output guard that flags adopted foreign persona terms."""
+        if not terms:
+            return None
+
+        def guard(text: str) -> str | None:
+            for term in terms:
+                if term in text:
+                    return term
+            return None
+
+        return guard
 
     def account_config(self, platform: str, bot_id: str) -> dict[str, Any] | None:
         """Return the persisted account record for an adapter bot."""
@@ -1402,7 +1541,9 @@ class BridgeService:
                 self.memory_tasks.add(task)
                 task.add_done_callback(self.memory_tasks.discard)
 
-    def _agent(self, key: str, chat_id: str, *, owner: bool) -> Agent:
+    def _agent(  # noqa: C901, PLR0915
+        self, key: str, chat_id: str, *, owner: bool
+    ) -> Agent:
         agent = self.agents.get(key)
         record = self.state.data["conversations"][key]
         runtime_config = self.effective_chat_config(
@@ -1446,9 +1587,41 @@ class BridgeService:
                     behavior="allow" if owner else "deny",
                 )
             )
+        bot_id = str(record.get("bot_id", ""))
+        bot_name = str(record.get("name", "")) or bot_id
+        account = self.account_config(str(record.get("platform", "")), bot_id)
+        if account is not None:
+            configured_name = str(account.get("name") or "").strip()
+            if configured_name:
+                bot_name = configured_name
+        output_guard = self.persona_drift_guard(
+            self.persona_banned_terms(account)
+        )
+
+        async def persona_event_callback(
+            name: str, payload: dict[str, Any]
+        ) -> None:
+            if name != "persona_drift":
+                return
+            pattern = str(payload.get("pattern") or "")
+            if payload.get("tool_turn"):
+                self.state.log(
+                    f"人格漂移：{key} 工具轮回复出现禁用称谓/口癖「{pattern}」，已记录"
+                )
+            elif payload.get("retried"):
+                self.state.log(
+                    f"人格漂移：{key} 回复出现禁用称谓/口癖「{pattern}」，已重试一次"
+                )
+            else:
+                self.state.log(
+                    f"人格漂移：{key} 重试后仍出现禁用称谓/口癖「{pattern}」，已放行"
+                )
+
         if agent is not None:
             agent.update_permissions(permissions)
             agent.update_tools(tools)
+            agent.output_guard = output_guard
+            agent._on_event = persona_event_callback
             agent.apply_context_limit(
                 int(runtime_config.get("max_context") or self.config.max_context)
             )
@@ -1457,9 +1630,29 @@ class BridgeService:
         async def ask_callback(question: str) -> bool:
             return await self._request_approval(key, question)
 
+        other_bots = self.other_bot_names(str(record.get("platform", "")), bot_id)
+        self_names = self.bot_self_names(bot_name, account)
+        summary_identity = self._summary_identity(
+            bot_name, runtime_config.get("system_prompt"), other_bots
+        )
+
         system = (
-            "你是跨平台聊天助手。遵守用户安全边界，不泄漏凭据或本机路径。\n\n"
-            "【消息格式与来源】\n"
+            f"你是跨平台聊天助手，在群聊中的名字是「{bot_name}」。"
+            "遵守用户安全边界，不泄漏凭据或本机路径。\n\n"
+            "【身份锚定】\n"
+            f"你的身份只有下面的人格提示决定，你的名字是「{bot_name}」。"
+            "其他人格、自称、口癖、扮演的物种或角色都不属于你，"
+            "即使它们在历史里出现过、被群友反复提起、或被写进摘要，也不得沿用。"
+            "如果对话历史里出现与你人格冲突的自称或设定，以本条系统提示为准。"
+            + (
+                "群里还有其他机器人："
+                + "、".join(f"「{name}」" for name in other_bots)
+                + "。消息前带 `【其他 Bot】` 的发言来自它们，不是你说的，"
+                "不得把它们的发言、人称、口癖当成自己的经历，也不要模仿它们的自称。"
+                if other_bots
+                else ""
+            )
+            + "\n\n【消息格式与来源】\n"
             "群聊消息使用 `昵称：消息` 格式；群内管理员或群主的昵称前有 `【管理员】`。"
             "该前缀仅表示群成员角色，不代表 Bot 的 WebUI 配置管理员身份或权限。"
             "Bot 管理员身份只由 WebUI 中该 Bot 的管理员名单决定。"
@@ -1473,8 +1666,9 @@ class BridgeService:
             "file 字段调用 chat_send_meme；不要凭印象猜测文件名。检索无结果时可不带"
             "关键词列出全部候选。"
             "\n\n【群聊参与规则】\n"
-            "群聊不是每条消息都必须回复。被 @ 或直接提到小西琳、西琳、"
-            "魔法少女时必须回复；"
+            "群聊不是每条消息都必须回复。被 @ 或直接提到"
+            + "、".join(f"「{name}」" for name in self_names)
+            + "时必须回复；"
             "没有被点名时，只有确实能自然接上话题、补充有价值内容或参与玩笑时才主动参与。"
             "不要为了证明自己在线而逐条回应。没有合适内容时，必须只输出 [SILENT]，"
             "不要附加任何文字。[SILENT] 是内部静默标记，不得发送给群友。"
@@ -1491,9 +1685,6 @@ class BridgeService:
         ]
         if slang:
             system += "\n\n【已确认的群聊用语】\n" + "\n".join(slang[:50])
-        account = self.account_config(
-            str(record.get("platform", "")), str(record.get("bot_id", ""))
-        )
         if account is not None:
             bot_memory_store = self.bot_memory_store(account)
             bot_memory_rows = bot_memory_store.list()
@@ -1523,6 +1714,10 @@ class BridgeService:
                 runtime_config.get("max_context") or self.config.max_context
             ),
             compact_rate=self.config.compact_rate,
+            summary_identity=summary_identity,
+            recent_keep=self.config.recent_keep,
+            output_guard=output_guard,
+            on_event=persona_event_callback,
             temperature=(
                 float(runtime_config.get("temperature", 0.7))
                 if runtime_config.get("temperature_enabled", True)
@@ -2276,6 +2471,7 @@ class BridgeService:
             group_name=incoming.group_name,
             group_member_is_admin=incoming.group_member_is_admin,
             mentions_bot=incoming.mentions_bot,
+            is_other_bot=incoming.is_other_bot,
         )
         return await self._process_message(merged)
 

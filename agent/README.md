@@ -79,6 +79,10 @@ Agent(
     autosave=True,  # run() 结束后自动落盘
     max_context=262144,  # 上下文 token 预算
     compact_rate=0.8,  # 达到预算比例时压缩
+    summary_identity="",  # 摘要时必须维持的身份说明（Bot 名、人格、其他 Bot）
+    recent_keep=8,  # 压缩后保留的最近消息条数（群聊场景可调大）
+    recent_self_keep=2,  # 硬裁剪时额外保护的本 Bot 最近发言条数
+    output_guard=None,  # 人格漂移检查；返回命中的禁用词时丢弃纯文本回复并重试一次
     reasoning_effort=None,  # 或 low / medium / high；也可设 OPENAI_REASONING_EFFORT
     project_memory_enabled=True,
     project_memory_tools_enabled=True,
