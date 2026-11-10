@@ -27,8 +27,10 @@ from agent.tool import Tool, ToolContext
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
-SCOPES: tuple[str, ...] = ("admin", "private", "all")
+SCOPES: tuple[str, ...] = ("admin", "private", "all", "manual")
 DEFAULT_SCOPE = "admin"
+ALLOWED_GROUP_KEYS: tuple[str, ...] = ("platform", "bot_id", "group_id")
+MAX_ALLOWED_GROUPS = 200
 MAX_TOOLS = 40
 MAX_SOURCE_CHARS = 32_768
 MAX_SOURCE_LINES = 2_000
@@ -242,6 +244,12 @@ def validate_definition(  # noqa: C901, PLR0912, PLR0915
     if scope not in SCOPES:
         message = f"scope 必须是 {', '.join(SCOPES)} 之一"
         raise CustomToolError(message)
+    allowed_groups = _normalize_allowed_groups(
+        body.get("allowed_groups") if scope == "manual" else None
+    )
+    if scope == "manual" and not allowed_groups:
+        message = "手动范围至少要指定一个群聊"
+        raise CustomToolError(message)
 
     enabled = body.get("enabled", True)
     if not isinstance(enabled, bool):
@@ -262,6 +270,7 @@ def validate_definition(  # noqa: C901, PLR0912, PLR0915
         "scope": scope,
         "timeout": round(timeout, 3),
         "enabled": enabled,
+        "allowed_groups": allowed_groups,
     }
 
 
@@ -270,6 +279,53 @@ def _as_number(value: object) -> float:
         return float(value)  # type: ignore[arg-type]
     except (TypeError, ValueError):
         return time.time()
+
+
+def _row_allowed_groups(row: dict[str, Any]) -> list[dict[str, str]]:
+    """Read a stored row's allowlist, coercing unusable values to ``[]``.
+
+    Unlike :func:`_normalize_allowed_groups`, this never raises: a stored row
+    with a corrupted ``allowed_groups`` field is repaired instead of rejected.
+    """
+    with contextlib.suppress(CustomToolError):
+        return _normalize_allowed_groups(row.get("allowed_groups"))
+    return []
+
+
+def _normalize_allowed_groups(raw: object) -> list[dict[str, str]]:
+    """Normalize a manual-scope allowlist into unique group triples.
+
+    Args:
+        raw: ``None`` or a list of mappings carrying ``platform``, ``bot_id``
+            and ``group_id`` string fields. Entries missing any of the three
+            non-empty fields are dropped.
+
+    Returns:
+        At most ``MAX_ALLOWED_GROUPS`` entries, each shaped as
+        ``{"platform": str, "bot_id": str, "group_id": str}`` and deduplicated
+        by the full triple in insertion order.
+
+    Raises:
+        CustomToolError: 当 ``raw`` 不是 None 也不是列表时。
+    """
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        message = "allowed_groups 必须是对象数组"
+        raise CustomToolError(message)
+    groups: list[dict[str, str]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        triple = tuple(str(item.get(key) or "").strip() for key in ALLOWED_GROUP_KEYS)
+        if not all(triple) or triple in seen:
+            continue
+        seen.add(triple)  # type: ignore[arg-type]
+        groups.append(dict(zip(ALLOWED_GROUP_KEYS, triple, strict=True)))
+        if len(groups) >= MAX_ALLOWED_GROUPS:
+            break
+    return groups
 
 
 def normalize_row(row: dict[str, Any]) -> dict[str, Any] | None:
@@ -299,6 +355,7 @@ def normalize_row(row: dict[str, Any]) -> dict[str, Any] | None:
         "scope": scope,
         "timeout": timeout,
         "enabled": bool(row.get("enabled", True)),
+        "allowed_groups": _row_allowed_groups(row),
         "source_sha256": str(row.get("source_sha256") or ""),
         "created_at": _as_number(row.get("created_at")),
         "updated_at": _as_number(row.get("updated_at")),

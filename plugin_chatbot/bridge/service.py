@@ -30,6 +30,7 @@ from .custom_tools import (
     DEFAULT_TIMEOUT,
     CustomToolError,
     CustomToolStore,
+    _normalize_allowed_groups,
     build_tool,
     execute,
     normalize_row,
@@ -483,9 +484,7 @@ def pending_lines(rows: list[dict[str, Any]]) -> str:
 
 def timestamped_lines(rows: list[dict[str, Any]]) -> str:
     """Join buffered messages with an explicit timestamp on every line."""
-    return "\n".join(
-        f"[{row.get('at') or ''}] {row.get('text') or ''}" for row in rows
-    )
+    return "\n".join(f"[{row.get('at') or ''}] {row.get('text') or ''}" for row in rows)
 
 
 def strip_think_blocks(text: str) -> str:
@@ -727,11 +726,7 @@ class BridgeService:
         platform: str | None = None,
         bot_id: str | None = None,
     ) -> bool:
-        account = (
-            self.account_config(platform, bot_id)
-            if platform and bot_id
-            else None
-        )
+        account = self.account_config(platform, bot_id) if platform and bot_id else None
         admins = self._access_ids(account.get("admins") if account else [], "private")
         return user_id in admins or (peer_id is not None and peer_id in admins)
 
@@ -755,11 +750,7 @@ class BridgeService:
         platform: str | None = None,
         bot_id: str | None = None,
     ) -> bool:
-        account = (
-            self.account_config(platform, bot_id)
-            if platform and bot_id
-            else None
-        )
+        account = self.account_config(platform, bot_id) if platform and bot_id else None
         if account is None:
             return False
         access_kind = "group" if kind == "group" else "private"
@@ -864,8 +855,7 @@ class BridgeService:
         persona_text = str(persona or "").strip()
         if persona_text:
             parts.append(
-                "本 Bot 的人格提示（摘要时必须维持）：\n"
-                f"{persona_text[:persona_limit]}"
+                f"本 Bot 的人格提示（摘要时必须维持）：\n{persona_text[:persona_limit]}"
             )
         if other_bots:
             parts.append(
@@ -1045,8 +1035,7 @@ class BridgeService:
                 if provider:
                     merged.update(
                         {
-                            "model": model_id(provider.get("model"))
-                            or merged["model"],
+                            "model": model_id(provider.get("model")) or merged["model"],
                             "base_url": provider.get("base_url") or merged["base_url"],
                             "api_key": provider.get("api_key") or merged["api_key"],
                             "max_context": positive_context_length(
@@ -1200,6 +1189,43 @@ class BridgeService:
         self.custom_tool_warned.add(key)
         self.state.log(f"自定义工具：{message}")
 
+    def _scope_allows(
+        self,
+        row: dict[str, Any],
+        *,
+        private: bool,
+        can_admin: bool,
+        peer_triple: tuple[str, str, str],
+    ) -> bool:
+        """Return whether one custom tool is visible in this conversation.
+
+        Args:
+            row: Stored custom-tool row carrying ``scope`` and, for manual
+                scope, ``allowed_groups``.
+            private: Whether the conversation is a direct message.
+            can_admin: Whether the sender may see admin-scoped tools (Agent
+                mode admin).
+            peer_triple: ``(platform, bot_id, peer_id)`` of the conversation;
+                ``peer_id`` is the group id for group chats.
+
+        Returns:
+            True 当工具在当前会话可见。
+        """
+        scope = str(row.get("scope") or DEFAULT_SCOPE)
+        if scope == "admin":
+            return can_admin
+        if scope == "private":
+            return private
+        if scope == "manual":
+            if private:
+                return False
+            allowed = _normalize_allowed_groups(row.get("allowed_groups"))
+            return any(
+                (entry["platform"], entry["bot_id"], entry["group_id"]) == peer_triple
+                for entry in allowed
+            )
+        return True
+
     def custom_tools_for(self, key: str) -> list[Tool]:
         """Custom tools visible in this conversation under the current scope."""
         rows = self.state.data["custom_tools"]
@@ -1208,16 +1234,23 @@ class BridgeService:
         record = self.state.data["conversations"].get(key) or {}
         private = record.get("kind") == "private"
         is_admin = private and self.conversation_is_admin(key)
-        mode = self.state.data["mode"]
+        can_admin = self.state.data["mode"] == "agent" and is_admin
+        peer_triple = (
+            str(record.get("platform", "")),
+            str(record.get("bot_id", "")),
+            str(record.get("peer_id", "")),
+        )
         reserved = self._reserved_tool_names()
         result: list[Tool] = []
         for row in rows:
             if not row.get("enabled", True):
                 continue
-            scope = str(row.get("scope") or DEFAULT_SCOPE)
-            if scope == "admin" and not (mode == "agent" and is_admin):
-                continue
-            if scope == "private" and not private:
+            if not self._scope_allows(
+                row,
+                private=private,
+                can_admin=can_admin,
+                peer_triple=peer_triple,
+            ):
                 continue
             name = str(row["name"])
             if name in reserved:
@@ -1297,6 +1330,7 @@ class BridgeService:
             "scope": row.get("scope", DEFAULT_SCOPE),
             "timeout": row.get("timeout", DEFAULT_TIMEOUT),
             "enabled": bool(row.get("enabled", True)),
+            "allowed_groups": row.get("allowed_groups") or [],
             "updated_at": row.get("updated_at", 0),
         }
 
@@ -1897,13 +1931,9 @@ class BridgeService:
             configured_name = str(account.get("name") or "").strip()
             if configured_name:
                 bot_name = configured_name
-        output_guard = self.persona_drift_guard(
-            self.persona_banned_terms(account)
-        )
+        output_guard = self.persona_drift_guard(self.persona_banned_terms(account))
 
-        async def persona_event_callback(
-            name: str, payload: dict[str, Any]
-        ) -> None:
+        async def persona_event_callback(name: str, payload: dict[str, Any]) -> None:
             if name != "persona_drift":
                 return
             pattern = str(payload.get("pattern") or "")
@@ -2838,8 +2868,7 @@ class BridgeService:
             content=chunks,
             preformatted=True,
             source_exchanges=[
-                {"sender": item.user_name, "user": item.text}
-                for item in messages
+                {"sender": item.user_name, "user": item.text} for item in messages
             ],
         )
         try:

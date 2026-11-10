@@ -116,7 +116,9 @@ class CustomToolValidationTests(unittest.TestCase):
     def test_rejects_oversized_source_and_tool_count(self) -> None:
         with self.assertRaises(CustomToolError):
             validate_definition(
-                sample(source="def run(a, c):\n    return '" + "x" * MAX_SOURCE_CHARS + "'"),
+                sample(
+                    source="def run(a, c):\n    return '" + "x" * MAX_SOURCE_CHARS + "'"
+                ),
                 existing=[],
             )
         crowded = [{"id": f"{i:016x}", "name": f"custom_t{i}"} for i in range(40)]
@@ -139,6 +141,74 @@ class CustomToolValidationTests(unittest.TestCase):
         self.assertEqual(300.0, row["timeout"])
         self.assertEqual("admin", row["scope"])
         self.assertTrue(row["enabled"])
+        self.assertEqual([], row["allowed_groups"])
+
+    def test_manual_scope_requires_group_triple(self) -> None:
+        with self.assertRaises(CustomToolError) as ctx:
+            validate_definition(sample(scope="manual"), existing=[])
+        self.assertIn("手动范围", str(ctx.exception))
+        with self.assertRaises(CustomToolError):
+            validate_definition(
+                sample(
+                    scope="manual",
+                    allowed_groups=[{"platform": "test", "bot_id": "bot"}],
+                ),
+                existing=[],
+            )
+
+    def test_manual_scope_normalizes_groups(self) -> None:
+        spec = validate_definition(
+            sample(
+                scope="manual",
+                allowed_groups=[
+                    {"platform": " test ", "bot_id": "bot", "group_id": "123"},
+                    {"platform": "test", "bot_id": "bot", "group_id": "123"},
+                    {"platform": "", "bot_id": "bot", "group_id": "0"},
+                    "junk",
+                ],
+            ),
+            existing=[],
+        )
+        assert isinstance(spec["allowed_groups"], list)
+
+    def test_non_manual_scope_clears_allowed_groups(self) -> None:
+        spec = validate_definition(
+            sample(
+                scope="all",
+                allowed_groups=[
+                    {"platform": "test", "bot_id": "bot", "group_id": "123"}
+                ],
+            ),
+            existing=[],
+        )
+        self.assertEqual([], spec["allowed_groups"])
+
+    def test_manual_scope_row_survives_broken_groups(self) -> None:
+        row = normalize_row(
+            {
+                "id": "c" * 16,
+                "name": "custom_manual",
+                "scope": "manual",
+                "allowed_groups": "junk",
+            }
+        )
+        assert row is not None
+        self.assertEqual([], row["allowed_groups"])
+        row = normalize_row(
+            {
+                "id": "d" * 16,
+                "name": "custom_manual",
+                "scope": "manual",
+                "allowed_groups": [
+                    {"platform": "test", "bot_id": "bot", "group_id": "123"}
+                ],
+            }
+        )
+        assert row is not None
+        self.assertEqual(
+            [{"platform": "test", "bot_id": "bot", "group_id": "123"}],
+            row["allowed_groups"],
+        )
 
 
 class CustomToolExecutionTests(unittest.TestCase):
@@ -170,7 +240,9 @@ class CustomToolExecutionTests(unittest.TestCase):
         self.assertEqual([], payload["leaked"])
 
     def test_print_does_not_break_the_protocol(self) -> None:
-        source = 'print("noise")\ndef run(args, ctx):\n    print("more")\n    return "ok"\n'
+        source = (
+            'print("noise")\ndef run(args, ctx):\n    print("more")\n    return "ok"\n'
+        )
         with tempfile.TemporaryDirectory() as ws:
             result = asyncio.run(
                 execute(
@@ -203,7 +275,9 @@ class CustomToolExecutionTests(unittest.TestCase):
         self.assertIn("<custom_tool:custom_bad>", result["traceback"])
 
     def test_timeout_kills_the_process(self) -> None:
-        source = "import time\ndef run(args, ctx):\n    time.sleep(30)\n    return 'x'\n"
+        source = (
+            "import time\ndef run(args, ctx):\n    time.sleep(30)\n    return 'x'\n"
+        )
         with tempfile.TemporaryDirectory() as ws:
             result = asyncio.run(
                 execute(
@@ -279,6 +353,84 @@ class CustomToolServiceTests(unittest.TestCase):
     def test_state_backfills_custom_tools(self) -> None:
         self.assertIn("custom_tools", self.service.state.data)
         self.assertEqual([], self.service.state.data["custom_tools"])
+
+    def test_manual_scope_matrix(self) -> None:
+        admin_key, friend_key, group_key = self._keys()
+        self._create(
+            scope="manual",
+            allowed_groups=[{"platform": "test", "bot_id": "bot", "group_id": "room"}],
+        )
+        names = {
+            key: {tool.name for tool in self.service.custom_tools_for(key)}
+            for key in (admin_key, friend_key, group_key)
+        }
+        self.assertIn("custom_probe", names[group_key])
+        self.assertNotIn("custom_probe", names[admin_key])
+        self.assertNotIn("custom_probe", names[friend_key])
+
+    def test_manual_scope_requires_full_triple_match(self) -> None:
+        _, _, group_key = self._keys()
+        self._create(
+            scope="manual",
+            allowed_groups=[{"platform": "test", "bot_id": "bot", "group_id": "other"}],
+        )
+        self.assertEqual(
+            [], [tool.name for tool in self.service.custom_tools_for(group_key)]
+        )
+        self.service.state.data["custom_tools"] = []
+        self._create(
+            scope="manual",
+            allowed_groups=[{"platform": "test", "bot_id": "bot", "group_id": "ROOM"}],
+        )
+        self.assertEqual(
+            [], [tool.name for tool in self.service.custom_tools_for(group_key)]
+        )
+        self.service.state.data["custom_tools"] = []
+        self._create(
+            scope="manual",
+            allowed_groups=[{"platform": "test", "bot_id": "bot", "group_id": "ro*"}],
+        )
+        self.assertEqual(
+            [], [tool.name for tool in self.service.custom_tools_for(group_key)]
+        )
+
+    def test_tool_catalog_lists_manual_tools(self) -> None:
+        self._create(
+            scope="manual",
+            allowed_groups=[{"platform": "test", "bot_id": "bot", "group_id": "room"}],
+        )
+        catalog = {row["name"]: row for row in self.service.tool_catalog()}
+        self.assertIn("custom_probe", catalog)
+        self.assertTrue(catalog["custom_probe"]["admin_only"])
+
+    def test_manual_tool_respects_group_enabled_tools(self) -> None:
+        _admin_key, _friend_key, group_key = self._keys()
+        self._create(
+            scope="manual",
+            allowed_groups=[{"platform": "test", "bot_id": "bot", "group_id": "room"}],
+        )
+        self.service.state.data["groups"] = [
+            {
+                "id": "grp-test",
+                "platform": "test",
+                "bot_id": "bot",
+                "group_id": "room",
+                "enabled": True,
+                "enabled_tools": ["WebSearch"],
+            }
+        ]
+        self.service.state.save()
+        self.assertNotIn(
+            "custom_probe", self.service.session_tool_config(group_key)["enabled"]
+        )
+        self.service.state.data["groups"][0]["enabled_tools"] = [
+            "WebSearch",
+            "custom_probe",
+        ]
+        self.service.state.save()
+        self.assertIn(
+            "custom_probe", self.service.session_tool_config(group_key)["enabled"]
+        )
 
     def test_scope_matrix(self) -> None:
         admin_key, friend_key, group_key = self._keys()
@@ -377,9 +529,7 @@ class CustomToolServiceTests(unittest.TestCase):
         self.service.state.data["conversations"][admin_key]["enabled_tools"] = [
             "custom_probe"
         ]
-        self.service.update_custom_tool(
-            str(created["id"]), {"name": "custom_renamed"}
-        )
+        self.service.update_custom_tool(str(created["id"]), {"name": "custom_renamed"})
         self.assertEqual(
             ["custom_renamed"], self.service.state.data["accounts"][0]["enabled_tools"]
         )
@@ -435,7 +585,9 @@ class CustomToolServiceTests(unittest.TestCase):
             if item.name == "custom_probe"
         )
         ctx = ToolContext(workspace=self.temp.name)
-        self.assertEqual("hello agent", asyncio.run(tool.handler({"who": "agent"}, ctx)))
+        self.assertEqual(
+            "hello agent", asyncio.run(tool.handler({"who": "agent"}, ctx))
+        )
 
     def test_tool_handler_reports_errors_with_prefix(self) -> None:
         admin_key, _, _ = self._keys()

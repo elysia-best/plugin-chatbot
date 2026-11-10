@@ -3,16 +3,18 @@ import {
   Check, CircleAlert, Pencil, Play, Plus, Trash2, Wrench, X,
 } from 'lucide-react';
 
-const SCOPES = ['admin', 'private', 'all'];
+const SCOPES = ['admin', 'private', 'all', 'manual'];
 const SCOPE_LABELS = {
   admin: '仅管理员私聊',
   private: '所有私聊',
   all: '所有会话',
+  manual: '手动指定群聊',
 };
 const SCOPE_HINTS = {
   admin: '只有 Agent 模式下的管理员私聊能调用，与内置 Bash 同级。',
   private: '所有已批准的私聊都能调用，包含 Chat 模式。',
   all: '群聊里任何人都可能诱导模型运行该脚本，等同于给群成员一个受限 shell。',
+  manual: '默认对所有会话隐藏，仅下面勾选的群聊可见。',
 };
 const MAX_TOOLS = 40;
 const SCHEMA_TEMPLATE = `{
@@ -96,6 +98,7 @@ function emptyForm() {
   return {
     name: '', description: '', scope: 'admin', timeout: 30, enabled: true,
     schemaText: SCHEMA_TEMPLATE, source: SOURCE_TEMPLATE, argsText: '{}',
+    allowedGroups: [],
   };
 }
 
@@ -107,7 +110,7 @@ function parseJson(text, label) {
   }
 }
 
-function Editor({ token, toolId, onClose, onSaved }) {
+function Editor({ token, groups, toolId, onClose, onSaved }) {
   const [form, setForm] = useState(emptyForm);
   const [busy, setBusy] = useState(false);
   const [loading, setLoading] = useState(Boolean(toolId));
@@ -130,6 +133,7 @@ function Editor({ token, toolId, onClose, onSaved }) {
           schemaText: JSON.stringify(row.input_schema || { type: 'object', properties: {} }, null, 2),
           source: row.source || '',
           argsText: '{}',
+          allowedGroups: Array.isArray(row.allowed_groups) ? row.allowed_groups : [],
         });
         if (row.status === 'invalid' && row.error) setError(row.error);
       })
@@ -156,6 +160,7 @@ function Editor({ token, toolId, onClose, onSaved }) {
       enabled: form.enabled,
       input_schema: parsed.value,
       source: form.source,
+      allowed_groups: form.scope === 'manual' ? form.allowedGroups : [],
     };
     try {
       if (toolId) await api(token, `/custom-tools/${toolId}`, 'PUT', body);
@@ -184,6 +189,23 @@ function Editor({ token, toolId, onClose, onSaved }) {
     } finally {
       setBusy(false);
     }
+  }
+
+  function groupKey(group) {
+    return `${group.platform} ${group.bot_id} ${group.group_id}`;
+  }
+
+  function toggleGroup(group) {
+    const triple = {
+      platform: String(group.platform || ''),
+      bot_id: String(group.bot_id || ''),
+      group_id: String(group.group_id || ''),
+    };
+    const current = form.allowedGroups;
+    const selected = current.some((item) => groupKey(item) === groupKey(triple));
+    set('allowedGroups', selected
+      ? current.filter((item) => groupKey(item) !== groupKey(triple))
+      : [...current, triple]);
   }
 
   if (loading) {
@@ -220,6 +242,27 @@ function Editor({ token, toolId, onClose, onSaved }) {
           <span>范围说明</span>
           <span className="inline-note">{SCOPE_HINTS[form.scope]}</span>
         </div>
+        {form.scope === 'manual' && (
+          <div className="field wide">
+            <span>允许的群聊（至少选一个）</span>
+            {groups.length ? (
+              <div className="tool-check-grid">
+                {groups.map((group) => {
+                  const selected = form.allowedGroups.some((item) => groupKey(item) === groupKey(group));
+                  const label = `${group.name || group.group_id} · ${group.platform}/${group.bot_id} · ${group.group_id}`;
+                  return (
+                    <label key={group.id} className="check-row" title={label}>
+                      <input type="checkbox" checked={selected} onChange={() => toggleGroup(group)} />
+                      <span>{label}</span>
+                    </label>
+                  );
+                })}
+              </div>
+            ) : (
+              <span className="inline-note">还没有群聊策略，请先在「群聊策略」里添加。</span>
+            )}
+          </div>
+        )}
         <label className="field wide">
           <span>参数 Schema（JSON Schema）</span>
           <textarea className="code-area short" value={form.schemaText} onChange={(e) => set('schemaText', e.target.value)} spellCheck={false} />
@@ -366,7 +409,7 @@ export default function CustomToolsPanel({ token, onRefresh }) {
         )}
       </div>
       {editing && (
-        <Editor token={token} toolId={editing === 'new' ? '' : editing} onClose={() => setEditing('')} onSaved={saved} />
+        <Editor token={token} groups={groups} toolId={editing === 'new' ? '' : editing} onClose={() => setEditing('')} onSaved={saved} />
       )}
     </div>
   );
