@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 from dataclasses import dataclass, field
 from typing import Any, Protocol
@@ -16,6 +17,7 @@ from .errors import ContextOverflowError, is_context_overflow, parse_context_lim
 from .messages import Message, ToolCall
 
 MAX_IMAGES_PER_REQUEST = 50
+STREAM_IDLE_TIMEOUT_GRACE_SECONDS = 1.0
 
 
 class LLMBackend(Protocol):
@@ -68,6 +70,7 @@ class LLMClient:
         max_tokens: int | None = None,
         reasoning_effort: str | None = None,
         timeout: float = 120.0,
+        stream_idle_timeout: float | None = None,
         client: Any | None = None,
         *,
         allow_environment_fallback: bool = True,
@@ -75,12 +78,16 @@ class LLMClient:
         self.model = model or (
             os.getenv("OPENAI_MODEL", "") if allow_environment_fallback else ""
         )
-        base = base_url or (
-            os.getenv("OPENAI_BASE_URL") if allow_environment_fallback else None
-        ) or None
-        key = api_key or (
-            os.getenv("OPENAI_API_KEY") if allow_environment_fallback else None
-        ) or "EMPTY"
+        base = (
+            base_url
+            or (os.getenv("OPENAI_BASE_URL") if allow_environment_fallback else None)
+            or None
+        )
+        key = (
+            api_key
+            or (os.getenv("OPENAI_API_KEY") if allow_environment_fallback else None)
+            or "EMPTY"
+        )
         self.temperature = temperature
         self.max_tokens = max_tokens
         effort = (
@@ -93,6 +100,11 @@ class LLMClient:
             )
         )
         self.reasoning_effort = effort.strip() or None
+        # 流式响应的相邻 chunk 读超时；缺省取请求超时的 1/2（下限 30s），
+        # 防止上游“连接正常但流停住”时挂满整个 timeout 才失败。
+        if stream_idle_timeout is None:
+            stream_idle_timeout = max(30.0, timeout / 2)
+        self.stream_idle_timeout = stream_idle_timeout
         # client 参数便于测试注入 mock
         self._client = client or AsyncOpenAI(
             base_url=base, api_key=key, timeout=timeout, max_retries=0
@@ -154,8 +166,19 @@ class LLMClient:
             tool_calls: dict[int, ToolCall] = {}
             finish_reason: str | None = None
             usage = Usage()
+            idle_timeout = self.stream_idle_timeout
 
-            async for chunk in stream:
+            stream_iterator = stream.__aiter__()
+            while True:
+                # 看门狗：相邻 chunk 间隔超过 idle_timeout 即判为流停住，
+                # 立即失败而非等满整个请求超时。
+                try:
+                    chunk = await asyncio.wait_for(
+                        stream_iterator.__anext__(),
+                        timeout=idle_timeout + STREAM_IDLE_TIMEOUT_GRACE_SECONDS,
+                    )
+                except StopAsyncIteration:
+                    break
                 if getattr(chunk, "usage", None):
                     u = chunk.usage
                     if u.prompt_tokens:
