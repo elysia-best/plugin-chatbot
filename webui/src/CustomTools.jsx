@@ -110,7 +110,7 @@ function parseJson(text, label) {
   }
 }
 
-function Editor({ token, groups, toolId, onClose, onSaved }) {
+function Editor({ token, groups = [], toolId, onClose, onSaved }) {
   const [form, setForm] = useState(emptyForm);
   const [busy, setBusy] = useState(false);
   const [loading, setLoading] = useState(Boolean(toolId));
@@ -312,7 +312,7 @@ function Editor({ token, groups, toolId, onClose, onSaved }) {
   );
 }
 
-export default function CustomToolsPanel({ token, onRefresh }) {
+export default function CustomToolsPanel({ token, groups = [], onRefresh }) {
   const [rows, setRows] = useState([]);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(true);
