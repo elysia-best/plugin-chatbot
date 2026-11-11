@@ -180,7 +180,7 @@ export default function OverviewPage({ snapshot, onNavigate }) {
                       <Activity size={14} />
                     </span>
                     <div>
-                      <strong>{item.text}</strong>
+                      <strong title={item.text}>{item.text}</strong>
                       <small>{formatTime(item.at)}</small>
                     </div>
                   </div>

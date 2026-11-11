@@ -174,7 +174,7 @@
   display: flex;
   align-items: center;
   gap: 10px;
-  padding-left: 16px;
+  padding: 0 4px 0 16px;
   border-radius: var(--radius-input);
   background: var(--color-mist);
   transition:
@@ -182,6 +182,11 @@
     box-shadow var(--dur-base) var(--ease-soft);
 }
 
+.login__input:hover {
+  background: #eef3f9;
+}
+
+/* 聚焦环只画在整条输入框上；内部 input 自身不画任何边框或外环，避免双层轮廓。 */
 .login__input:focus-within {
   background: var(--surface-card);
   box-shadow:
@@ -192,20 +197,35 @@
 .login__input-icon {
   flex: none;
   color: var(--text-faint);
+  transition: color var(--dur-base) var(--ease-soft);
+}
+
+.login__input:focus-within .login__input-icon {
+  color: var(--color-indigo);
 }
 
 .login__input-control {
   flex: 1;
   min-width: 0;
-  padding-left: 0;
+  height: 46px;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
   background: transparent;
+  color: var(--text-primary);
   font-size: 14px;
+  line-height: 1.5;
+  outline: none;
+  appearance: none;
 }
 
-.login__input-control:hover,
-.login__input-control:focus {
-  background: transparent;
-  box-shadow: none;
+.login__input-control::placeholder {
+  color: var(--text-faint);
+}
+
+.login__input-control:-webkit-autofill {
+  -webkit-text-fill-color: var(--text-primary);
+  transition: background-color 9999s ease-out 0s;
 }
 
 .login__reveal {
@@ -214,7 +234,6 @@
   flex: none;
   width: 40px;
   height: 40px;
-  margin-right: 4px;
   border-radius: var(--radius-pill);
   color: var(--text-muted);
   transition:

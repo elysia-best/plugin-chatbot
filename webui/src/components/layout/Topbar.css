@@ -3,7 +3,7 @@
   align-items: center;
   justify-content: space-between;
   gap: 20px;
-  padding: 4px 4px 18px;
+  padding: 4px 0 18px;
 }
 
 .topbar__context {

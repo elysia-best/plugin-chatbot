@@ -77,7 +77,7 @@ export default function LoginPage({ onLogin, notice }) {
                 <KeyRound size={17} className="login__input-icon" aria-hidden="true" />
                 <input
                   id="access-token"
-                  className="ui-input login__input-control"
+                  className="login__input-control"
                   type={visible ? 'text' : 'password'}
                   value={token}
                   autoFocus

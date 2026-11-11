@@ -21,7 +21,6 @@
   flex: 1;
   min-width: 0;
   width: 100%;
-  max-width: var(--page-max-width);
   padding-bottom: 40px;
   animation: soft-rise var(--dur-entry) var(--ease-soft) both;
 }
@@ -82,10 +81,6 @@
 
   .app-main {
     min-height: auto;
-  }
-
-  .app-page {
-    max-width: none;
   }
 
   .two-columns {

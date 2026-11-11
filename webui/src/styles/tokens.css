@@ -82,8 +82,9 @@
   --space-96: 96px;
 
   /* ---- 布局 ------------------------------------------------------------ */
+  /* 外壳最大宽度 = 侧栏 + 间隙 + 内容页 + 两侧内边距，保证顶栏与页面右缘严格对齐 */
   --page-max-width: 1200px;
-  --shell-max-width: 1600px;
+  --shell-max-width: 1536px;
   --sidebar-width: 264px;
   --card-padding: 32px;
   --element-gap: 24px;

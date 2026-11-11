@@ -26,7 +26,7 @@
   position: absolute;
   left: 24px;
   right: 24px;
-  bottom: 14px;
+  bottom: 12px;
   height: 4px;
   border-radius: var(--radius-pill);
   background: currentColor;
@@ -79,7 +79,7 @@
 
 .metric__detail {
   margin-top: 2px;
-  padding-bottom: 12px;
+  padding-bottom: 20px;
   color: var(--text-faint);
   font-size: 11.5px;
 }
@@ -156,7 +156,15 @@
   flex: none;
 }
 
+.account-tree__group span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .account-tree__group small {
+  flex: none;
   margin-left: auto;
   color: var(--text-faint);
   font-family: var(--font-mono);
@@ -212,12 +220,22 @@
   color: var(--tone-mint);
 }
 
+.activity-feed__item > div {
+  flex: 1;
+  min-width: 0;
+}
+
 .activity-feed__item strong {
-  display: block;
+  display: -webkit-box;
+  overflow: hidden;
   color: var(--text-secondary);
   font-size: 13px;
   font-weight: var(--weight-medium);
   line-height: 1.5;
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
 }
 
 .activity-feed__item small {
