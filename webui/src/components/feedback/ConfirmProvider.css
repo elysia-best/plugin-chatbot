@@ -1,0 +1,42 @@
+.ui-confirm {
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+  padding: 4px 0 12px;
+}
+
+.ui-confirm__icon {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 44px;
+  height: 44px;
+  border-radius: var(--radius-pill);
+  background: var(--tone-indigo-bg);
+  color: var(--tone-indigo);
+}
+
+.ui-confirm__icon.is-danger {
+  background: var(--tone-danger-bg);
+  color: var(--tone-danger);
+}
+
+.ui-confirm__message {
+  padding-top: 10px;
+  color: var(--text-secondary);
+  font-size: 14px;
+  line-height: 1.7;
+}
+
+.ui-prompt {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding-bottom: 12px;
+}
+
+.ui-prompt__message {
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1.65;
+}

@@ -1,0 +1,146 @@
+.ui-table {
+  min-width: 0;
+}
+
+.ui-table__scroll {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  overflow-x: auto;
+  padding: 6px;
+}
+
+.ui-table__head {
+  display: grid;
+  grid-template-columns: var(--table-cols, 1fr);
+  gap: 18px;
+  min-width: var(--table-min, 720px);
+  padding: 0 18px 8px;
+  color: var(--text-faint);
+  font-size: 11px;
+  letter-spacing: 0.02em;
+}
+
+.ui-table__head-end {
+  text-align: right;
+}
+
+.ui-table__row {
+  display: grid;
+  grid-template-columns: var(--table-cols, 1fr);
+  align-items: center;
+  gap: 18px;
+  min-width: var(--table-min, 720px);
+  padding: 15px 18px;
+  border-radius: var(--radius-button);
+  animation: soft-rise 420ms var(--ease-soft) both;
+  animation-delay: calc(var(--stagger-index, 0) * 40ms);
+  transition:
+    background-color var(--dur-base) var(--ease-soft),
+    box-shadow var(--dur-base) var(--ease-soft);
+}
+
+.ui-table__row:hover {
+  background: var(--surface-sunken);
+}
+
+.ui-table__row--plain {
+  animation: none;
+}
+
+.ui-table__cell {
+  min-width: 0;
+  color: var(--text-secondary);
+  font-size: 13px;
+}
+
+.ui-table__label {
+  display: block;
+  margin-bottom: 3px;
+  color: var(--text-faint);
+  font-size: 11px;
+  letter-spacing: 0.02em;
+}
+
+.ui-table__value {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ui-table__value--mono {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--text-muted);
+}
+
+.ui-table__identity {
+  display: flex;
+  align-items: center;
+  gap: 13px;
+  min-width: 0;
+}
+
+.ui-table__avatar {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 42px;
+  height: 42px;
+  border-radius: var(--radius-pill);
+  background: var(--tone-indigo-bg);
+  color: var(--tone-indigo);
+}
+
+.ui-table__avatar--mint {
+  background: var(--tone-mint-bg);
+  color: var(--tone-mint);
+}
+
+.ui-table__avatar--blossom {
+  background: var(--tone-blossom-bg);
+  color: var(--tone-blossom);
+}
+
+.ui-table__avatar--amber {
+  background: var(--tone-amber-bg);
+  color: var(--tone-amber);
+}
+
+.ui-table__avatar--slate {
+  background: var(--tone-slate-bg);
+  color: var(--tone-slate);
+}
+
+.ui-table__identity-text {
+  min-width: 0;
+}
+
+.ui-table__identity-text strong {
+  display: block;
+  overflow: hidden;
+  color: var(--text-primary);
+  font-size: 14px;
+  font-weight: var(--weight-semibold);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ui-table__identity-text small {
+  display: block;
+  margin-top: 3px;
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: 11.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ui-table__actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}

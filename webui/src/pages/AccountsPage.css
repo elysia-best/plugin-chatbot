@@ -1,0 +1,10 @@
+.accounts-page__groups {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-secondary);
+}
+
+.accounts-page__groups svg {
+  color: var(--tone-mint);
+}

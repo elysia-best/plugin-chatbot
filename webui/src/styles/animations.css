@@ -1,0 +1,121 @@
+/* ==========================================================================
+   动效层：入场、浮起、微光、骨架微光
+   规范要求：动效 300ms 起，卡片级位移 500ms，位移克制（4~8px）。
+   ========================================================================== */
+
+@keyframes soft-rise {
+  from {
+    opacity: 0;
+    transform: translate3d(0, 14px, 0);
+  }
+  to {
+    opacity: 1;
+    transform: translate3d(0, 0, 0);
+  }
+}
+
+@keyframes soft-fade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes soft-scale-in {
+  from {
+    opacity: 0;
+    transform: translate3d(0, 18px, 0) scale(0.97);
+  }
+  to {
+    opacity: 1;
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+}
+
+@keyframes soft-slide-in {
+  from {
+    opacity: 0;
+    transform: translate3d(24px, 0, 0);
+  }
+  to {
+    opacity: 1;
+    transform: translate3d(0, 0, 0);
+  }
+}
+
+@keyframes soft-slide-out {
+  from {
+    opacity: 1;
+    transform: translate3d(0, 0, 0);
+  }
+  to {
+    opacity: 0;
+    transform: translate3d(24px, 0, 0);
+  }
+}
+
+@keyframes soft-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes soft-shimmer {
+  from {
+    background-position: 200% 0;
+  }
+  to {
+    background-position: -200% 0;
+  }
+}
+
+@keyframes soft-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.35);
+  }
+  50% {
+    box-shadow: 0 0 0 6px rgba(16, 185, 129, 0);
+  }
+}
+
+@keyframes soft-glow-drift {
+  0%,
+  100% {
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+  50% {
+    transform: translate3d(0, -18px, 0) scale(1.04);
+  }
+}
+
+/* ---- 可复用动画类 ------------------------------------------------------ */
+
+.anim-rise {
+  animation: soft-rise var(--dur-entry) var(--ease-soft) both;
+}
+
+.anim-fade {
+  animation: soft-fade var(--dur-base) var(--ease-soft) both;
+}
+
+/* 列表错峰入场：子元素通过 --stagger-index 控制延迟 */
+.anim-stagger > * {
+  animation: soft-rise var(--dur-entry) var(--ease-soft) both;
+  animation-delay: calc(var(--stagger-index, 0) * 55ms);
+}
+
+.anim-stagger {
+  --stagger-index: 0;
+}
+
+.spin {
+  animation: soft-spin 900ms linear infinite;
+}
+
+/* 页面切换：整体淡入上浮，子区块再错峰 */
+.page-enter {
+  animation: soft-rise var(--dur-entry) var(--ease-soft) both;
+}

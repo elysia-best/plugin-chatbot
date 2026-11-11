@@ -1,0 +1,194 @@
+.ui-field {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.ui-field--wide {
+  grid-column: 1 / -1;
+}
+
+.ui-field__label {
+  color: var(--text-muted);
+  font-size: var(--text-label);
+  font-weight: var(--weight-medium);
+  letter-spacing: var(--tracking-label);
+}
+
+.ui-field__hint {
+  color: var(--text-faint);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+/* ---- 输入基座 ---------------------------------------------------------- */
+.ui-input {
+  width: 100%;
+  padding: 13px 18px;
+  border: 0;
+  border-radius: var(--radius-input);
+  background: var(--color-mist);
+  color: var(--text-primary);
+  font-size: var(--text-body-lg);
+  line-height: 1.5;
+  outline: none;
+  transition:
+    background-color var(--dur-base) var(--ease-soft),
+    box-shadow var(--dur-base) var(--ease-soft);
+}
+
+.ui-input::placeholder {
+  color: var(--text-faint);
+}
+
+.ui-input:hover:not(:disabled) {
+  background: #eef3f9;
+}
+
+.ui-input:focus {
+  background: var(--surface-card);
+  box-shadow:
+    0 0 0 4px rgba(99, 102, 241, 0.2),
+    0 10px 26px rgba(99, 102, 241, 0.14);
+}
+
+.ui-input:disabled {
+  opacity: 0.6;
+}
+
+.ui-textarea {
+  min-height: 104px;
+  resize: vertical;
+  line-height: 1.65;
+  font-size: var(--text-body);
+}
+
+.ui-textarea--code {
+  min-height: 140px;
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  line-height: 1.7;
+  white-space: pre;
+  tab-size: 2;
+}
+
+/* ---- 下拉 -------------------------------------------------------------- */
+.ui-select {
+  position: relative;
+  display: block;
+}
+
+.ui-select__control {
+  appearance: none;
+  padding-right: 46px;
+  cursor: pointer;
+}
+
+.ui-select__chevron {
+  position: absolute;
+  top: 50%;
+  right: 18px;
+  transform: translateY(-50%);
+  color: var(--color-indigo);
+  pointer-events: none;
+  transition: transform var(--dur-base) var(--ease-soft);
+}
+
+.ui-select__control:focus + .ui-select__chevron {
+  transform: translateY(-50%) rotate(180deg);
+}
+
+/* ---- 复选 -------------------------------------------------------------- */
+.ui-check {
+  display: inline-flex;
+  align-items: flex-start;
+  gap: 10px;
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1.5;
+  cursor: pointer;
+  user-select: none;
+}
+
+.ui-check input {
+  position: absolute;
+  opacity: 0;
+  width: 1px;
+  height: 1px;
+}
+
+.ui-check__box {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 20px;
+  height: 20px;
+  margin-top: 1px;
+  border-radius: 7px;
+  background: var(--color-mist);
+  color: transparent;
+  transition:
+    background-color var(--dur-base) var(--ease-soft),
+    box-shadow var(--dur-base) var(--ease-soft),
+    transform var(--dur-quick) var(--ease-spring),
+    color var(--dur-quick) var(--ease-soft);
+}
+
+.ui-check:hover .ui-check__box {
+  background: #e6ecf4;
+}
+
+.ui-check input:checked + .ui-check__box {
+  background: var(--color-indigo);
+  color: var(--surface-card);
+  box-shadow: 0 6px 16px rgba(99, 102, 241, 0.32);
+}
+
+.ui-check input:focus-visible + .ui-check__box {
+  box-shadow:
+    0 0 0 4px rgba(99, 102, 241, 0.2),
+    0 6px 16px rgba(99, 102, 241, 0.32);
+}
+
+.ui-check input:active + .ui-check__box {
+  transform: scale(0.9);
+}
+
+.ui-check__text small {
+  display: block;
+  margin-top: 2px;
+  color: var(--text-faint);
+  font-size: 11.5px;
+}
+
+/* ---- 搜索框 ------------------------------------------------------------ */
+.ui-search {
+  position: relative;
+  display: block;
+  min-width: 0;
+}
+
+.ui-search__icon {
+  position: absolute;
+  top: 50%;
+  left: 16px;
+  transform: translateY(-50%);
+  color: var(--text-faint);
+  pointer-events: none;
+  transition: color var(--dur-base) var(--ease-soft);
+}
+
+.ui-search__control {
+  padding-left: 42px;
+  font-size: 13.5px;
+}
+
+.ui-search__control:focus + .ui-search__icon,
+.ui-search:focus-within .ui-search__icon {
+  color: var(--color-indigo);
+}
+
+.ui-search__control::-webkit-search-cancel-button {
+  appearance: none;
+}

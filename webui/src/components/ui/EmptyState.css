@@ -1,0 +1,35 @@
+.ui-empty {
+  display: grid;
+  justify-items: center;
+  gap: 10px;
+  padding: 56px 24px;
+  text-align: center;
+}
+
+.ui-empty--compact {
+  padding: 28px 16px;
+}
+
+.ui-empty__icon {
+  display: grid;
+  place-items: center;
+  width: 56px;
+  height: 56px;
+  margin-bottom: 6px;
+  border-radius: var(--radius-pill);
+  background: var(--tone-indigo-bg);
+  color: var(--color-indigo);
+}
+
+.ui-empty__title {
+  color: var(--text-primary);
+  font-size: 15px;
+  font-weight: var(--weight-semibold);
+}
+
+.ui-empty__detail {
+  max-width: 360px;
+  color: var(--text-muted);
+  font-size: 12.5px;
+  line-height: 1.7;
+}

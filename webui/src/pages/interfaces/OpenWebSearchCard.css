@@ -1,0 +1,73 @@
+.mcp-card {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  margin: 0 0 16px;
+  padding: 22px;
+  border-radius: var(--radius-card);
+  background: var(--surface-sunken);
+}
+
+.mcp-card__head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.mcp-card__title {
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+}
+
+.mcp-card__icon {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 44px;
+  height: 44px;
+  border-radius: var(--radius-pill);
+  background: var(--tone-indigo-bg);
+  color: var(--tone-indigo);
+}
+
+.mcp-card__title strong {
+  display: block;
+  margin: 4px 0 2px;
+  font-size: 15px;
+  font-weight: var(--weight-semibold);
+}
+
+.mcp-card__title small {
+  display: block;
+  max-width: 560px;
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.mcp-card__controls {
+  display: grid;
+  grid-template-columns: minmax(180px, 0.6fr) minmax(240px, 1.4fr) auto;
+  align-items: end;
+  gap: 14px;
+}
+
+.mcp-card__controls .ui-check {
+  padding-bottom: 13px;
+}
+
+.mcp-card__tools {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+@media (max-width: 860px) {
+  .mcp-card__controls {
+    grid-template-columns: 1fr;
+  }
+}

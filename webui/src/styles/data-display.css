@@ -1,0 +1,78 @@
+/* ==========================================================================
+   列表容器与工具条（跨页面复用）
+   ========================================================================== */
+
+.table-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+  padding: 22px 26px 6px;
+}
+
+.table-toolbar__title {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  color: var(--text-primary);
+  font-size: 14px;
+  font-weight: var(--weight-semibold);
+}
+
+.table-toolbar__title svg {
+  color: var(--color-indigo);
+}
+
+.table-toolbar__actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+/* 列表主体内的分组标题 */
+.list-section-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 0 2px 12px;
+}
+
+.list-section-title h3 {
+  font-size: 15px;
+  font-weight: var(--weight-semibold);
+}
+
+/* 卡片内的分段：用柔底块替代描边分割 */
+.panel-block {
+  padding: 18px;
+  border-radius: var(--radius-button);
+  background: var(--surface-sunken);
+}
+
+.panel-block + .panel-block {
+  margin-top: 12px;
+}
+
+.panel-block__title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+
+.panel-block__title strong {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: var(--weight-semibold);
+}
+
+.panel-block__title strong svg {
+  color: var(--color-indigo);
+}

@@ -1,0 +1,244 @@
+/* ---- 指标卡 ------------------------------------------------------------ */
+.metric-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: var(--grid-gap);
+}
+
+.metric {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 24px;
+  border-radius: var(--radius-card);
+  background: var(--surface-card);
+  box-shadow: var(--shadow-card);
+  animation: soft-rise var(--dur-entry) var(--ease-soft) both;
+  animation-delay: calc(var(--stagger-index, 0) * 70ms);
+  transition:
+    transform var(--dur-slow) var(--ease-soft),
+    box-shadow var(--dur-slow) var(--ease-soft);
+}
+
+.metric::after {
+  content: '';
+  position: absolute;
+  left: 24px;
+  right: 24px;
+  bottom: 14px;
+  height: 4px;
+  border-radius: var(--radius-pill);
+  background: currentColor;
+  opacity: 0.18;
+}
+
+.metric:hover {
+  transform: translateY(-8px);
+  box-shadow: var(--shadow-card-hover);
+}
+
+.metric:hover .ui-chip {
+  transform: scale(1.1);
+  background: var(--tone-indigo-bg-strong);
+}
+
+.metric--indigo {
+  color: var(--tone-indigo);
+}
+
+.metric--mint {
+  color: var(--tone-mint);
+}
+
+.metric--amber {
+  color: var(--tone-amber);
+}
+
+.metric--blossom {
+  color: var(--tone-blossom);
+}
+
+.metric__icon {
+  margin-bottom: 14px;
+}
+
+.metric__label {
+  color: var(--text-muted);
+  font-size: 12.5px;
+}
+
+.metric__value {
+  color: var(--text-primary);
+  font-size: 34px;
+  font-weight: var(--weight-bold);
+  line-height: 1.1;
+  letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums;
+}
+
+.metric__detail {
+  margin-top: 2px;
+  padding-bottom: 12px;
+  color: var(--text-faint);
+  font-size: 11.5px;
+}
+
+/* ---- 账号树 ------------------------------------------------------------ */
+.account-tree {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.account-tree__item {
+  padding: 12px 14px;
+  border-radius: var(--radius-button);
+  transition: background-color var(--dur-base) var(--ease-soft);
+  animation: soft-rise var(--dur-entry) var(--ease-soft) both;
+  animation-delay: calc(var(--stagger-index, 0) * 55ms);
+}
+
+.account-tree__item:hover {
+  background: var(--surface-sunken);
+}
+
+.account-tree__row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.account-tree__text {
+  flex: 1;
+  min-width: 0;
+}
+
+.account-tree__text strong {
+  display: block;
+  overflow: hidden;
+  font-size: 14px;
+  font-weight: var(--weight-semibold);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.account-tree__text small {
+  display: block;
+  color: var(--text-faint);
+  font-size: 11.5px;
+}
+
+.account-tree__groups {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 8px 0 0 52px;
+}
+
+.account-tree__group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  font-size: 12.5px;
+  transition: background-color var(--dur-base) var(--ease-soft);
+}
+
+.account-tree__group:hover {
+  background: var(--tone-mint-bg);
+}
+
+.account-tree__group svg {
+  color: var(--tone-mint);
+  flex: none;
+}
+
+.account-tree__group small {
+  margin-left: auto;
+  color: var(--text-faint);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+}
+
+.account-tree__add {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  width: max-content;
+  margin-top: 4px;
+  padding: 5px 10px;
+  border-radius: var(--radius-pill);
+  color: var(--color-indigo-strong);
+  font-size: 11.5px;
+  transition: background-color var(--dur-base) var(--ease-soft);
+}
+
+.account-tree__add:hover {
+  background: var(--tone-indigo-bg);
+}
+
+/* ---- 活动流 ------------------------------------------------------------ */
+.activity-feed {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.activity-feed__item {
+  display: flex;
+  gap: 12px;
+  padding: 10px 12px;
+  border-radius: var(--radius-button);
+  animation: soft-rise var(--dur-entry) var(--ease-soft) both;
+  animation-delay: calc(var(--stagger-index, 0) * 50ms);
+  transition: background-color var(--dur-base) var(--ease-soft);
+}
+
+.activity-feed__item:hover {
+  background: var(--surface-sunken);
+}
+
+.activity-feed__marker {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 32px;
+  height: 32px;
+  border-radius: var(--radius-pill);
+  background: var(--tone-mint-bg);
+  color: var(--tone-mint);
+}
+
+.activity-feed__item strong {
+  display: block;
+  color: var(--text-secondary);
+  font-size: 13px;
+  font-weight: var(--weight-medium);
+  line-height: 1.5;
+}
+
+.activity-feed__item small {
+  display: block;
+  margin-top: 2px;
+  color: var(--text-faint);
+  font-size: 10.5px;
+}
+
+@media (max-width: 1200px) {
+  .metric-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 560px) {
+  .metric-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .account-tree__groups {
+    margin-left: 8px;
+  }
+}

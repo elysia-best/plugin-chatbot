@@ -1,0 +1,111 @@
+.ui-card {
+  position: relative;
+  padding: var(--card-padding);
+  border-radius: var(--radius-card);
+  background: var(--surface-card);
+  box-shadow: var(--shadow-card);
+  transition:
+    transform var(--dur-slow) var(--ease-soft),
+    box-shadow var(--dur-slow) var(--ease-soft);
+}
+
+.ui-card--interactive {
+  cursor: pointer;
+}
+
+.ui-card--interactive:hover {
+  transform: translateY(-8px);
+  box-shadow: var(--shadow-card-hover);
+}
+
+.ui-card--bare {
+  padding: 0;
+  overflow: hidden;
+}
+
+/* ---- 卡片头部 ---------------------------------------------------------- */
+.ui-card__header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-16);
+  margin-bottom: var(--space-24);
+}
+
+.ui-card--bare .ui-card__header {
+  margin: 0;
+  padding: 22px 26px 18px;
+}
+
+.ui-card__heading {
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+  min-width: 0;
+}
+
+.ui-card__icon {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 44px;
+  height: 44px;
+  border-radius: var(--radius-pill);
+  background: var(--tone-indigo-bg);
+  color: var(--tone-indigo);
+  transition:
+    transform var(--dur-slow) var(--ease-spring),
+    background-color var(--dur-base) var(--ease-soft);
+}
+
+.ui-card--interactive:hover .ui-card__icon {
+  transform: scale(1.1);
+  background: var(--tone-indigo-bg-strong);
+}
+
+.ui-card__icon--mint {
+  background: var(--tone-mint-bg);
+  color: var(--tone-mint);
+}
+
+.ui-card__icon--blossom {
+  background: var(--tone-blossom-bg);
+  color: var(--tone-blossom);
+}
+
+.ui-card__icon--amber {
+  background: var(--tone-amber-bg);
+  color: var(--tone-amber);
+}
+
+.ui-card__title {
+  font-size: var(--text-subheading);
+  font-weight: var(--weight-semibold);
+  line-height: var(--leading-subheading);
+  color: var(--text-primary);
+}
+
+.ui-card__description {
+  margin-top: 4px;
+  color: var(--text-muted);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.ui-card__actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: none;
+}
+
+@media (max-width: 720px) {
+  .ui-card__header {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .ui-card__actions {
+    justify-content: flex-end;
+  }
+}

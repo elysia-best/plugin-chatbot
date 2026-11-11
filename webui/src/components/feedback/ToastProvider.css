@@ -1,0 +1,86 @@
+.ui-toasts {
+  position: fixed;
+  right: 24px;
+  bottom: 24px;
+  z-index: 90;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  pointer-events: none;
+}
+
+.ui-toast {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 240px;
+  max-width: 400px;
+  padding: 13px 14px 13px 16px;
+  border-radius: var(--radius-button);
+  background: var(--surface-card);
+  box-shadow: var(--shadow-float);
+  animation: soft-slide-in 320ms var(--ease-spring) both;
+  pointer-events: auto;
+}
+
+.ui-toast.is-leaving {
+  animation: soft-slide-out 220ms var(--ease-soft) both;
+}
+
+.ui-toast__icon {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 30px;
+  height: 30px;
+  border-radius: var(--radius-pill);
+  background: var(--tone-indigo-bg);
+  color: var(--tone-indigo);
+}
+
+.ui-toast--success .ui-toast__icon {
+  background: var(--tone-mint-bg);
+  color: var(--tone-mint);
+}
+
+.ui-toast--error .ui-toast__icon {
+  background: var(--tone-danger-bg);
+  color: var(--tone-danger);
+}
+
+.ui-toast__message {
+  flex: 1;
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.ui-toast__close {
+  flex: none;
+  width: 24px;
+  height: 24px;
+  border-radius: var(--radius-pill);
+  color: var(--text-faint);
+  font-size: 17px;
+  line-height: 1;
+  transition:
+    background-color var(--dur-base) var(--ease-soft),
+    color var(--dur-base) var(--ease-soft);
+}
+
+.ui-toast__close:hover {
+  background: var(--color-mist);
+  color: var(--text-secondary);
+}
+
+@media (max-width: 720px) {
+  .ui-toasts {
+    right: 16px;
+    left: 16px;
+    bottom: 16px;
+  }
+
+  .ui-toast {
+    max-width: none;
+  }
+}

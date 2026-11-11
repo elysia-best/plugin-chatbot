@@ -77,6 +77,32 @@ npm run build
 `plugin_chatbot/plugins/webui/`. The plugin serves that packaged directory at
 `/chat-agent/`.
 
+For UI work, `npm run dev` serves the console on `http://localhost:5178/` and
+proxies `/chat-agent` to a running NoneBot server (default
+`http://127.0.0.1:8080`, override with `CHATBOT_BACKEND`), so live API data is
+available without rebuilding after every change.
+
+The frontend is a Vite + React app organised as a small design system plus
+feature pages:
+
+```
+webui/src/
+  styles/           设计令牌、基础层、动效、表单与列表排版
+  lib/              API 客户端、导航定义、纯函数格式化
+  hooks/            useCountUp 等无副作用 hook
+  components/ui/    Button / Card / Field / Modal / Tabs / DataTable / Badge …
+  components/layout/ 外壳、侧边栏、上下文栏
+  components/feedback/ 提示与确认浮层
+  pages/            每个页面一个目录，页面私有的编辑器与样式就近放置
+```
+
+Visual language follows the StyleKit `soft-ui` direction: 16/24px radii,
+low-saturation palette, color-tinted soft shadows, 300–500ms motion, and no
+1px hard borders. Tokens live in `src/styles/tokens.css`; change them there
+rather than hard-coding colors in components. All motion is disabled
+automatically under `prefers-reduced-motion`.
+
+
 ## Multi-adapter configuration
 
 The management panel now keeps configuration in three layers:

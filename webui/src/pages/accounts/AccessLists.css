@@ -1,0 +1,136 @@
+.access {
+  margin-top: 24px;
+  padding: 22px;
+  border-radius: var(--radius-card);
+  background: var(--surface-sunken);
+}
+
+.access__head h4 {
+  font-size: 15px;
+  font-weight: var(--weight-semibold);
+}
+
+.access__head p {
+  margin-top: 6px;
+  max-width: 620px;
+  color: var(--text-muted);
+  font-size: 12.5px;
+  line-height: 1.65;
+}
+
+.access__composer {
+  margin-top: 18px;
+  padding: 18px;
+  border-radius: var(--radius-button);
+  background: var(--surface-card);
+  box-shadow: var(--shadow-soft);
+}
+
+.access__composer-actions {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+  margin-top: 16px;
+}
+
+.access__composer-actions .ui-search {
+  flex: 1 1 240px;
+}
+
+.access__lists {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 14px;
+}
+
+.access__list {
+  padding: 14px;
+  border-radius: var(--radius-button);
+  background: var(--surface-card);
+  box-shadow: var(--shadow-soft);
+  min-width: 0;
+}
+
+.access__list--wide {
+  margin-top: 12px;
+}
+
+.access__list-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 4px 8px;
+}
+
+.access__list-head strong {
+  font-size: 12.5px;
+  font-weight: var(--weight-semibold);
+  color: var(--text-primary);
+}
+
+.access__row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 6px;
+  border-radius: var(--radius-sm);
+  transition: background-color var(--dur-base) var(--ease-soft);
+}
+
+.access__row:hover {
+  background: var(--surface-sunken);
+}
+
+.access__row-text {
+  flex: 1;
+  min-width: 0;
+}
+
+.access__row-text strong {
+  display: block;
+  overflow: hidden;
+  color: var(--text-secondary);
+  font-size: 12.5px;
+  font-weight: var(--weight-medium);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.access__row-text small {
+  display: block;
+  overflow: hidden;
+  color: var(--text-faint);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.access__avatar {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 32px;
+  height: 32px;
+  border-radius: var(--radius-pill);
+  background: var(--tone-indigo-bg);
+  color: var(--tone-indigo);
+}
+
+.access__empty {
+  padding: 12px 6px;
+  color: var(--text-faint);
+  font-size: 11.5px;
+}
+
+@media (max-width: 900px) {
+  .access__lists {
+    grid-template-columns: 1fr;
+  }
+
+  .access__composer .form-grid--three {
+    grid-template-columns: 1fr;
+  }
+}

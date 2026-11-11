@@ -1,0 +1,48 @@
+.ui-chip {
+  display: inline-grid;
+  place-items: center;
+  flex: none;
+  width: 40px;
+  height: 40px;
+  border-radius: var(--radius-pill);
+  background: var(--tone-indigo-bg);
+  color: var(--tone-indigo);
+  transition:
+    background-color var(--dur-base) var(--ease-soft),
+    transform var(--dur-slow) var(--ease-spring);
+}
+
+.ui-chip--lg {
+  width: 56px;
+  height: 56px;
+}
+
+.ui-chip--sm {
+  width: 32px;
+  height: 32px;
+}
+
+.ui-chip--mint {
+  background: var(--tone-mint-bg);
+  color: var(--tone-mint);
+}
+
+.ui-chip--blossom {
+  background: var(--tone-blossom-bg);
+  color: var(--tone-blossom);
+}
+
+.ui-chip--amber {
+  background: var(--tone-amber-bg);
+  color: var(--tone-amber);
+}
+
+.ui-chip--slate {
+  background: var(--tone-slate-bg);
+  color: var(--tone-slate);
+}
+
+.ui-chip--danger {
+  background: var(--tone-danger-bg);
+  color: var(--tone-danger);
+}
