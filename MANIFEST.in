@@ -1,0 +1,8 @@
+include README.md
+
+# Documentation, tests and the WebUI sources are development-only and are not
+# shipped inside the package. The built WebUI static files are packaged through
+# [tool.setuptools.package-data] instead.
+prune docs
+prune tests
+prune webui

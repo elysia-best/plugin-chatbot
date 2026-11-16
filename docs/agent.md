@@ -1,14 +1,14 @@
-# agent
+# agent 包
 
 一个可编程的、类 Claude Code 的 Python coding agent。它复刻了 `claude-code` 的基本功能：
 **工作区选定、多轮对话 + 工具调用循环、可编程的安全/权限选项**，LLM 只对接
 **OpenAI-compatible** `/chat/completions` 接口（基于官方 `openai` SDK）。
 
-该包不依赖 NoneBot，可被任何 asyncio 应用 `import` 后直接调用。
+该包不依赖 NoneBot，可被任何 asyncio 应用 `import` 后直接调用；`plugin_chatbot` 的桥接层就是它的调用方之一。
 
 ## 安装
 
-项目已用 `uv add openai` 添加依赖（`openai>=3.42.0`，其传输层为 `httpx2`）。
+依赖已写进 `pyproject.toml`（`openai>=3.42.0`，其传输层为 `httpx2`）。
 在项目根目录执行：
 
 ```bash
@@ -26,7 +26,7 @@ async def main():
     # base_url / api_key / model 缺省读 OPENAI_BASE_URL / OPENAI_API_KEY / OPENAI_MODEL
     agent = Agent(
         model="your-model",
-        workspace="D:/Projects/matrixbot/plugin-chatbot/plugin-chatbot",
+        workspace="D:/Projects/my-workspace",
         reasoning_effort="high",  # provider-dependent; omit to use provider default
         permission_mode="acceptEdits",  # default / acceptEdits / bypassPermissions / dontAsk / plan
     )
@@ -171,7 +171,7 @@ from agent import Agent
 async def main():
     agent = Agent(
         model="your-model",
-        workspace="D:/Projects/matrixbot/plugin-chatbot/plugin-chatbot",
+        workspace="D:/Projects/my-workspace",
         permission_mode="acceptEdits",
     )
 
@@ -192,7 +192,7 @@ async def main():
     # 重启进程后加载已有 chat 续接
     agent2 = Agent(
         model="your-model",
-        workspace="D:/Projects/matrixbot/plugin-chatbot/plugin-chatbot",
+        workspace="D:/Projects/my-workspace",
     )
     agent2.load_chat(chat_id)
     await agent2.run("恢复会话后的追问")
