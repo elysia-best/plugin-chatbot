@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
+import contextlib
 import math
 import secrets
 import time
@@ -47,6 +48,8 @@ from plugin_chatbot.bridge.service import (
     normalize_persona_banned_terms,
     normalize_probability,
     positive_context_length,
+    public_interface_row,
+    stored_api_key,
 )
 
 if TYPE_CHECKING:
@@ -546,12 +549,20 @@ def _console_token() -> str:
     try:
         token = token_path.read_text(encoding="utf-8").strip()
         if token:
+            _restrict_token_file(token_path)
             return token
     except OSError:
         pass
     token = secrets.token_urlsafe(32)
     token_path.write_text(token, encoding="utf-8")
+    _restrict_token_file(token_path)
     return token
+
+
+def _restrict_token_file(path: Path) -> None:
+    """令牌文件只应属主可读（Windows 上为空操作）。"""
+    with contextlib.suppress(OSError):
+        path.chmod(0o600)
 
 
 async def _authorize(x_console_token: str = Header(default="")) -> None:
@@ -799,21 +810,28 @@ async def _delete_group(row_id: str) -> dict[str, bool]:
 async def _interfaces(kind: str) -> list[dict[str, Any]]:
     if kind not in {"providers", "skills", "mcps", "rules"}:
         raise HTTPException(status_code=404, detail="Unknown interface kind")
-    return _service.state.data["interfaces"][kind]
+    return [
+        _public_interface_row(kind, row)
+        for row in _service.state.data["interfaces"][kind]
+        if isinstance(row, dict)
+    ]
 
 
 @_api.post("/api/interfaces/{kind}", dependencies=[Depends(_authorize)])
 async def _create_interface(kind: str, body: dict[str, Any]) -> dict[str, Any]:
     if kind not in {"providers", "skills", "mcps", "rules"}:
         raise HTTPException(status_code=404, detail="Unknown interface kind")
-    row = {"id": _new_id(), **body}
+    payload = dict(body)
+    if kind == "providers":
+        payload["api_key"] = _stored_api_key(payload, "")
+    row = {"id": _new_id(), **payload}
     if kind == "providers":
         row["models"] = normalize_model_records(row.get("models", []))
         row["context_length"] = positive_context_length(row.get("context_length"))
     _service.state.data["interfaces"][kind].append(row)
     _service.state.save()
     _service.agents.clear()
-    return row
+    return _public_interface_row(kind, row)
 
 
 @_api.put("/api/interfaces/{kind}/{row_id}", dependencies=[Depends(_authorize)])
@@ -825,13 +843,16 @@ async def _update_interface(
     row = _find_row(_service.state.data["interfaces"][kind], row_id)
     if row is None:
         raise HTTPException(status_code=404, detail="Interface not found")
-    row.update(body)
+    payload = dict(body)
+    if kind == "providers":
+        payload["api_key"] = _stored_api_key(payload, str(row.get("api_key") or ""))
+    row.update(payload)
     if kind == "providers":
         row["models"] = normalize_model_records(row.get("models", []))
         row["context_length"] = positive_context_length(row.get("context_length"))
     _service.state.save()
     _service.agents.clear()
-    return row
+    return _public_interface_row(kind, row)
 
 
 @_api.delete("/api/interfaces/{kind}/{row_id}", dependencies=[Depends(_authorize)])
@@ -845,6 +866,14 @@ async def _delete_interface(kind: str, row_id: str) -> dict[str, bool]:
     ]
     _service.state.save()
     return {"deleted": len(_service.state.data["interfaces"][kind]) < before}
+
+
+def _public_interface_row(kind: str, row: dict[str, Any]) -> dict[str, Any]:
+    return public_interface_row(kind, row)
+
+
+def _stored_api_key(body: dict[str, Any], current: str) -> str:
+    return stored_api_key(body, current)
 
 
 async def _fetch_provider_models(base_url: str, api_key: str) -> list[dict[str, Any]]:
@@ -873,8 +902,17 @@ async def _fetch_provider_models(base_url: str, api_key: str) -> list[dict[str, 
     dependencies=[Depends(_authorize)],
 )
 async def _discover_provider_models_preview(body: dict[str, Any]) -> dict[str, Any]:
+    api_key = str(body.get("api_key") or "")
+    if not api_key.strip():
+        # 编辑已有接口时前端拿不到明文密钥，用 id 回退到库里那份。
+        provider = _find_row(
+            _service.state.data["interfaces"]["providers"],
+            str(body.get("provider_id") or ""),
+        )
+        if provider is not None:
+            api_key = str(provider.get("api_key") or "")
     models = await _fetch_provider_models(
-        str(body.get("base_url") or ""), str(body.get("api_key") or "")
+        str(body.get("base_url") or ""), api_key
     )
     return {"models": models}
 
@@ -989,7 +1027,15 @@ async def _test_custom_tool(tool_id: str, body: dict[str, Any]) -> dict[str, Any
 
 @_api.get("/api/status", dependencies=[Depends(_authorize)])
 async def _status() -> dict[str, Any]:
-    return _service.snapshot()
+    snapshot = _service.snapshot()
+    interfaces = dict(snapshot.get("interfaces") or {})
+    interfaces["providers"] = [
+        _public_interface_row("providers", row)
+        for row in interfaces.get("providers") or []
+        if isinstance(row, dict)
+    ]
+    snapshot["interfaces"] = interfaces
+    return snapshot
 
 
 @_api.get("/api/logs", dependencies=[Depends(_authorize)])

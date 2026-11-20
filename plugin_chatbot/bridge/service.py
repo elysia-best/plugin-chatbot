@@ -75,8 +75,13 @@ PENDING_RECENT_LIMIT = 3
 PENDING_TIMESTAMP_FORMAT = "%Y-%m-%d %H:%M:%S"
 MAX_SLANG_REVIEW_BATCH = 20
 SLANG_REVIEW_TIMEOUT_SECONDS = 60
+API_KEY_MASK_PREFIX = "••••"
+API_KEY_VISIBLE_CHARS = 4
 MEMORY_FIELDS = ("title", "description", "type", "content")
 MEMORY_WRAPPER_KEYS = ("memory", "memories", "result", "data", "items")
+# 审批是管理员决定：只有管理员私聊里的这些回复能放行/拒绝工具调用。
+APPROVAL_REPLIES = frozenset({"通过", "同意", "yes", "approve"})
+DENIAL_REPLIES = frozenset({"拒绝", "不同意", "no", "deny"})
 MODEL_CONTEXT_KEYS = (
     "context_length",
     "context_window",
@@ -131,6 +136,42 @@ def extract_context_length(value: Any, *, depth: int = 0) -> int | None:
             if result is not None:
                 return result
     return None
+
+
+def mask_api_key(value: str) -> str:
+    """只回显末 4 位，避免完整密钥进入浏览器。"""
+    key = value.strip()
+    if not key:
+        return ""
+    if len(key) <= API_KEY_VISIBLE_CHARS:
+        return API_KEY_MASK_PREFIX
+    return f"{API_KEY_MASK_PREFIX}{key[-API_KEY_VISIBLE_CHARS:]}"
+
+
+def public_interface_row(kind: str, row: dict[str, Any]) -> dict[str, Any]:
+    """返回给控制台的副本；provider 的 api_key 永远不回明文。"""
+    public = dict(row)
+    if kind == "providers":
+        public["api_key"] = mask_api_key(str(row.get("api_key") or ""))
+    return public
+
+
+def stored_api_key(body: dict[str, Any], current: str) -> str:
+    """算出要落库的密钥：掩码 / 空 / 缺省都不覆盖已存值。
+
+    控制台只能看到掩码，回传的也是掩码；直接写回会把真密钥冲掉。
+    清除密钥请显式传 ``clear_api_key: true``。
+    """
+    if bool(body.pop("clear_api_key", False)):
+        body.pop("api_key", None)
+        return ""
+    value = body.pop("api_key", None)
+    if value is None:
+        return current
+    text = str(value)
+    if not text.strip() or text.startswith(API_KEY_MASK_PREFIX):
+        return current
+    return text.strip()
 
 
 def normalize_model_records(models: Any) -> list[dict[str, Any]]:
@@ -222,6 +263,12 @@ class IncomingMessage:
     source_exchanges: list[dict[str, str]] | None = None
 
 
+def _restrict_permissions(path: Path, mode: int = 0o600) -> None:
+    """把含机密的文件收紧到仅属主可读写；Windows 上基本是空操作。"""
+    with contextlib.suppress(OSError):
+        path.chmod(mode)
+
+
 class BridgeState:
     """Atomic JSON state with chat-to-agent mappings and administrator settings."""
 
@@ -263,6 +310,9 @@ class BridgeState:
                 self.path.replace(
                     self.path.with_name(f"{self.path.name}.corrupt-{int(time.time())}")
                 )
+        else:
+            # 旧版本写入的文件可能对同机其他用户可读，读到就顺手收紧。
+            _restrict_permissions(self.path)
         for key, value in (
             ("conversations", {}),
             ("slang", []),
@@ -374,6 +424,8 @@ class BridgeState:
         temp.write_text(
             json.dumps(self.data, ensure_ascii=False, indent=2), encoding="utf-8"
         )
+        # 先收紧再原子替换，最终文件不会出现过宽松权限的窗口。
+        _restrict_permissions(temp)
         temp.replace(self.path)
 
     def _normalize_custom_tools(self) -> list[dict[str, Any]]:
@@ -2946,10 +2998,16 @@ class BridgeService:
         pending = self.pending_questions.get(key)
         if pending and not pending.done():
             answer = incoming.text.strip().casefold()
-            if answer in {"通过", "同意", "yes", "approve"}:
+            if not owner:
+                # 非管理员不能批准工具调用；记录下来，消息继续按普通聊天处理。
+                if answer in APPROVAL_REPLIES | DENIAL_REPLIES:
+                    self.state.log(
+                        f"{key} 忽略非管理员的审批回复：{incoming.user_id}"
+                    )
+            elif answer in APPROVAL_REPLIES:
                 self.resolve_approval(key, approved=True)
                 return "已批准"
-            if answer in {"拒绝", "不同意", "no", "deny"}:
+            elif answer in DENIAL_REPLIES:
                 self.resolve_approval(key, approved=False)
                 return "已拒绝"
         for waiter in self.waiters.get(key, []):

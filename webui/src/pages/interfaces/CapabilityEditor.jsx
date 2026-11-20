@@ -15,10 +15,14 @@ const FIELD_LABELS = {
 const CONTENT_KEYS = { mcps: 'url', rules: 'content', skills: 'description' };
 
 export default function CapabilityEditor({ token, kind, value, onClose, onSave }) {
-  const [form, setForm] = useState({ ...value });
+  // 后端只回显密钥末 4 位，输入框保持空白：不填 = 沿用已存密钥。
+  const [form, setForm] = useState({ ...value, api_key: '' });
+  const [clearKey, setClearKey] = useState(false);
   const [busy, setBusy] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
+
+  const hasStoredKey = Boolean(value.api_key);
 
   const set = (key, next) => setForm((previous) => ({ ...previous, [key]: next }));
 
@@ -29,6 +33,7 @@ export default function CapabilityEditor({ token, kind, value, onClose, onSave }
       const result = await api(token, '/interfaces/providers/discover', 'POST', {
         base_url: form.base_url || '',
         api_key: form.api_key || '',
+        provider_id: value.id || '',
       });
       setForm((previous) => ({ ...previous, models: result.models }));
     } catch (err) {
@@ -43,7 +48,11 @@ export default function CapabilityEditor({ token, kind, value, onClose, onSave }
     try {
       const body =
         kind === 'providers'
-          ? { ...form, context_length: Number(form.context_length) || null }
+          ? {
+              ...form,
+              context_length: Number(form.context_length) || null,
+              clear_api_key: clearKey,
+            }
           : form;
       await onSave(body);
     } finally {
@@ -69,13 +78,35 @@ export default function CapabilityEditor({ token, kind, value, onClose, onSave }
             onChange={(next) => set('base_url', next)}
             placeholder="https://api.example.com/v1"
           />
-          <Field
-            label="API Key"
-            type="password"
-            value={form.api_key || ''}
-            onChange={(next) => set('api_key', next)}
-            autoComplete="off"
-          />
+          <div className="ui-field">
+            <span className="ui-field__label">API Key</span>
+            <input
+              className="ui-input"
+              type="password"
+              autoComplete="off"
+              value={form.api_key || ''}
+              placeholder={hasStoredKey && !clearKey ? '已保存，留空则保持不变' : '粘贴新的 API Key'}
+              disabled={clearKey}
+              onChange={(event) => set('api_key', event.target.value)}
+            />
+            {hasStoredKey ? (
+              <span className="ui-field__hint">
+                <label className="ui-check">
+                  <input
+                    type="checkbox"
+                    checked={clearKey}
+                    onChange={(event) => {
+                      setClearKey(event.target.checked);
+                      if (event.target.checked) set('api_key', '');
+                    }}
+                  />
+                  清除已保存的 Key
+                </label>
+              </span>
+            ) : (
+              <span className="ui-field__hint">保存后只会显示末 4 位。</span>
+            )}
+          </div>
           <Field
             label="备用上下文大小"
             type="number"

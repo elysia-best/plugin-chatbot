@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import tempfile
 import unittest
 from datetime import datetime
@@ -26,10 +27,13 @@ from plugin_chatbot.bridge.service import (
     conversation_key,
     extract_context_length,
     is_silent_reply,
+    mask_api_key,
     normalize_model_records,
     normalize_persona_banned_terms,
+    public_interface_row,
     sender_context,
     split_message,
+    stored_api_key,
     strip_think_blocks,
 )
 
@@ -62,6 +66,47 @@ class BridgeServiceTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.temp.cleanup()
+
+    def test_provider_api_key_is_masked_for_console(self) -> None:
+        self.service.state.data["interfaces"]["providers"] = [
+            {"id": "p1", "name": "P1", "api_key": "sk-live-abcdefgh1234"},
+            {"id": "p2", "name": "P2", "api_key": ""},
+        ]
+
+        masked = public_interface_row(
+            "providers", self.service.state.data["interfaces"]["providers"][0]
+        )
+        self.assertEqual("••••1234", masked["api_key"])
+        self.assertEqual("••••1234", mask_api_key("sk-live-abcdefgh1234"))
+        self.assertEqual("", mask_api_key(""))
+        self.assertEqual("••••", mask_api_key("abc"))
+        # 掩码不得污染真实存储（返回的是副本）
+        self.assertEqual(
+            "sk-live-abcdefgh1234",
+            self.service.state.data["interfaces"]["providers"][0]["api_key"],
+        )
+
+    def test_masked_api_key_never_overwrites_stored_key(self) -> None:
+        current = "sk-live-abcdefgh1234"
+        self.assertEqual(current, stored_api_key({"api_key": "••••1234"}, current))
+        self.assertEqual(current, stored_api_key({"api_key": ""}, current))
+        self.assertEqual(current, stored_api_key({}, current))
+        self.assertEqual(current, stored_api_key({"api_key": None}, current))
+        # 只有真的新密钥才覆盖
+        self.assertEqual(
+            "sk-new-9999", stored_api_key({"api_key": " sk-new-9999 "}, current)
+        )
+        # 显式清除
+        body = {"clear_api_key": True}
+        self.assertEqual("", stored_api_key(body, current))
+        self.assertNotIn("clear_api_key", body)
+
+    def test_state_file_is_owner_only(self) -> None:
+        self.service.state.save()
+        if os.name == "nt":
+            self.skipTest("Windows 上没有 POSIX 文件模式")
+        mode = self.service.state.path.stat().st_mode & 0o777
+        self.assertEqual(0o600, mode)
 
     def test_legacy_modes_migrate_to_chat_or_agent_and_drop_simulation_state(self) -> None:
         root = Path(self.temp.name) / "legacy-state"
@@ -193,6 +238,66 @@ class BridgeServiceTests(unittest.TestCase):
         self.assertEqual("approved", restored.state.data["conversations"][key]["status"])
         self.assertTrue(restored.is_allowed("group", "new-room", "member", "test", "bot"))
         self.assertNotIn("new-room", restored._access_ids(restored.state.data["accounts"][0]["blacklist"], "group"))
+
+    def test_group_member_cannot_approve_pending_tool_call(self) -> None:
+        async def run_test() -> None:
+            usage = SimpleNamespace(prompt_tokens=0, completion_tokens=0, total_tokens=0)
+            result = SimpleNamespace(
+                status="success", text="好的", usage=usage, tool_calls=[]
+            )
+            agent = SimpleNamespace(run=AsyncMock(return_value=result))
+            self.service._agent = cast("Any", lambda *_args, **_kwargs: agent)
+            key, _chat_id = self.service.resolve_chat("test", "bot", "group", "room-1")
+            future: asyncio.Future[bool] = asyncio.get_event_loop().create_future()
+            self.service.pending_questions[key] = future
+            incoming = IncomingMessage(
+                bot=None,
+                platform="test",
+                bot_id="bot",
+                kind="group",
+                peer_id="room-1",
+                user_id="member",
+                user_name="Member",
+                text="通过",
+                target=Target("room-1"),
+            )
+
+            reply = await self.service._process_message(incoming)
+
+            self.assertFalse(future.done())
+            self.assertNotEqual("已批准", reply)
+            self.assertIn(key, self.service.pending_questions)
+            self.assertTrue(
+                any(
+                    "忽略非管理员的审批回复" in entry.get("text", "")
+                    for entry in self.service.state.data["activity"]
+                )
+            )
+
+        asyncio.run(run_test())
+
+    def test_owner_can_approve_pending_tool_call(self) -> None:
+        async def run_test() -> None:
+            key, _chat_id = self.service.resolve_chat("test", "bot", "private", "owner")
+            future: asyncio.Future[bool] = asyncio.get_event_loop().create_future()
+            self.service.pending_questions[key] = future
+            incoming = IncomingMessage(
+                bot=None,
+                platform="test",
+                bot_id="bot",
+                kind="private",
+                peer_id="owner",
+                user_id="owner",
+                user_name="Owner",
+                text="通过",
+                target=Target("owner"),
+            )
+
+            self.assertEqual("已批准", await self.service._process_message(incoming))
+            self.assertTrue(future.done())
+            self.assertTrue(future.result())
+
+        asyncio.run(run_test())
 
     def test_unlisted_private_user_is_recorded_without_agent_reply(self) -> None:
         incoming = IncomingMessage(

@@ -93,6 +93,16 @@ def _wildcard_match(pattern: str, value: str) -> bool:
     return re.fullmatch(regex, val) is not None
 
 
+# 真正能链接/重定向下一条命令的 shell 元字符。单独的 $ 与括号不列入，
+# 避免把 `awk '{print $1}'`、`python -c "print(1)"` 这类常见命令误判。
+_SHELL_META_RE = re.compile(r";|&&|\|\||\||&|`|\$\(|>|<|[\r\n]")
+
+
+def _has_shell_chain(command: str | None) -> bool:
+    """命令里是否有链接/重定向，使它超出规则所允许的那一条命令。"""
+    return bool(command) and _SHELL_META_RE.search(command) is not None
+
+
 @dataclass
 class PermissionContext:
     """权限上下文：模式 + 规则 + 工作区目录。"""
@@ -140,7 +150,7 @@ class PermissionContext:
                 return rule
         return None
 
-    def check(  # noqa: C901, PLR0911
+    def check(  # noqa: C901, PLR0911, PLR0912
         self,
         tool_name: str,
         path: str | None = None,
@@ -159,6 +169,11 @@ class PermissionContext:
             return "ask"
 
         if rule and rule.behavior == "allow":
+            # allow 规则只放行「它当时看到的那个动作」：绝对路径跳出工作区、
+            # 或命令里带链接/重定向（`git *` 被 `git x; curl …|sh` 满足）
+            # 都超出授权范围，交回人工确认。
+            if self._escapes_workspace(path) or _has_shell_chain(command):
+                return "ask"
             return "allow"
         if rule and rule.behavior == "ask":
             return "ask"
@@ -187,6 +202,16 @@ class PermissionContext:
             return "ask"
         # 无 path（如 Bash / 网络）默认 ask
         return "ask"
+
+    def _escapes_workspace(self, path: str | None) -> bool:
+        """绝对路径跳出所有允许目录时，不再自动放行。
+
+        相对路径按工具约定就是工作区相对，由工具自己 resolve，不在这里判定，
+        否则会拿进程 cwd 误判。
+        """
+        if not path or not Path(path).is_absolute():
+            return False
+        return not (self.in_workspace(path) or self.in_session_allowed(path))
 
     def _is_dangerous_path(self, path: str) -> bool:
         real = _resolve(path)
