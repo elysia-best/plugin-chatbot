@@ -1,11 +1,7 @@
-"""Local speech synthesis and a path-confined audio library."""
+"""A path-confined audio library for voice messages."""
 
 from __future__ import annotations
 
-import asyncio
-import hashlib
-import importlib
-import threading
 from pathlib import Path
 
 _AUDIO_SUFFIXES = {
@@ -23,15 +19,13 @@ _AUDIO_SUFFIXES = {
     ".wav",
     ".wma",
 }
-_VOICE_LOCK = threading.Lock()
 
 
 class VoiceLibrary:
-    def __init__(self, root: Path, max_bytes: int, max_text_chars: int) -> None:
+    def __init__(self, root: Path, max_bytes: int) -> None:
         self.root = root.resolve()
         self.root.mkdir(parents=True, exist_ok=True)
         self.max_bytes = max_bytes
-        self.max_text_chars = max_text_chars
 
     def list(self) -> list[dict[str, object]]:
         rows = []
@@ -79,49 +73,3 @@ class VoiceLibrary:
         temp.write_bytes(data)
         temp.replace(path)
         return path
-
-    async def synthesize(
-        self, text: str, *, rate: int, volume: float, voice_id: str = ""
-    ) -> Path:
-        clean = text.strip()
-        if not clean or len(clean) > self.max_text_chars:
-            raise ValueError("合成文本长度超出限制")
-        filename = f"tts-{hashlib.sha256(clean.encode()).hexdigest()[:16]}.wav"
-        output = self.root / filename
-        output.unlink(missing_ok=True)
-        await asyncio.to_thread(
-            self._synthesize_sync, clean, output, rate, volume, voice_id
-        )
-        if output.stat().st_size > self.max_bytes:
-            output.unlink(missing_ok=True)
-            raise ValueError("合成音频超过大小限制")
-        return output
-
-    @staticmethod
-    def _synthesize_sync(
-        text: str, output: Path, rate: int, volume: float, voice_id: str
-    ) -> None:
-        try:
-            pyttsx3 = importlib.import_module("pyttsx3")
-        except ImportError as exc:
-            raise RuntimeError(  # noqa: TRY003
-                "本地语音合成依赖缺失，请安装 pyttsx3 和系统语音引擎"
-            ) from exc
-        with _VOICE_LOCK:
-            engine = pyttsx3.init()
-            engine.setProperty("rate", max(80, min(rate, 300)))
-            engine.setProperty("volume", max(0.0, min(volume, 1.0)))
-            if voice_id:
-                known = {voice.id for voice in engine.getProperty("voices")}
-                if voice_id not in known:
-                    engine.stop()
-                    raise ValueError("配置的 pyttsx3 voice_id 不存在")  # noqa: TRY003
-                engine.setProperty("voice", voice_id)
-            try:
-                engine.save_to_file(text, str(output))
-                engine.runAndWait()
-            finally:
-                engine.stop()
-        if not output.exists() or output.stat().st_size == 0:
-            output.unlink(missing_ok=True)
-            raise RuntimeError("pyttsx3 未生成可用音频文件")  # noqa: TRY003

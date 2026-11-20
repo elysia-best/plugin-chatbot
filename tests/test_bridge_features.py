@@ -165,27 +165,18 @@ class SlangTests(unittest.TestCase):
 
 
 class VoiceLibraryTests(unittest.IsolatedAsyncioTestCase):
-    async def test_library_confines_paths_and_synthesis_is_injected(self) -> None:
+    async def test_library_confines_paths(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
-            library = VoiceLibrary(Path(temp) / "voices", 1024 * 1024, 50)
+            library = VoiceLibrary(Path(temp) / "voices", 1024 * 1024)
             with self.assertRaises(ValueError):
                 library.resolve("../secret.wav")
             added = library.add("sample.wav", b"RIFFaudio")
             self.assertEqual(b"RIFFaudio", library.resolve(added.name).read_bytes())
+            self.assertIn(added.name, [row["name"] for row in library.list()])
             with self.assertRaises(ValueError):
                 library.add("../escape.wav", b"audio")
-
-            def fake_synthesize(
-                _text: str, target: Path, _rate: int, _volume: float, _voice_id: str
-            ) -> None:
-                target.write_bytes(b"RIFFdata")
-
-            with patch.object(
-                VoiceLibrary, "_synthesize_sync", side_effect=fake_synthesize
-            ):
-                result = await library.synthesize("hello", rate=175, volume=1.0)
-            self.assertTrue(result.is_file())
-            self.assertIn(result.name, [row["name"] for row in library.list()])
+            with self.assertRaises(ValueError):
+                library.add("note.txt", b"text")
 
 
 _PNG = b"\x89PNG\r\n\x1a\nimage"

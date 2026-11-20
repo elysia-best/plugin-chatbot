@@ -81,10 +81,6 @@ class Settings(BaseModel):
     bridge_meme_upload_enabled: bool = True
     bridge_voice_dir: str = ""
     bridge_voice_max_bytes: int = 20 * 1024 * 1024
-    bridge_voice_max_text_chars: int = 500
-    bridge_voice_rate: int = 175
-    bridge_voice_volume: float = 1.0
-    bridge_voice_id: str = ""
     bridge_voice_sends_per_hour: int = 20
     bridge_slang_enabled: bool = True
     bridge_slang_min_messages: int = 10
@@ -124,10 +120,6 @@ _service = BridgeService(
         if _settings.bridge_voice_dir
         else None,
         voice_max_bytes=max(1024, _settings.bridge_voice_max_bytes),
-        voice_max_text_chars=max(1, min(_settings.bridge_voice_max_text_chars, 2000)),
-        voice_rate=max(80, min(_settings.bridge_voice_rate, 300)),
-        voice_volume=max(0.0, min(_settings.bridge_voice_volume, 1.0)),
-        voice_id=_settings.bridge_voice_id,
         voice_sends_per_hour=max(1, min(_settings.bridge_voice_sends_per_hour, 500)),
         slang_enabled=_settings.bridge_slang_enabled,
         slang_min_messages=max(3, min(_settings.bridge_slang_min_messages, 100)),
@@ -1717,22 +1709,6 @@ async def _upload_voice(body: VoiceUploadRequest) -> dict[str, str]:
         ) from exc
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    return {"name": path.name}
-
-
-@_api.post("/api/voices/synthesize", dependencies=[Depends(_authorize)])
-async def _synthesize_voice(body: UpdateRequest) -> dict[str, str]:
-    try:
-        path = await _service.voice.synthesize(
-            body.value,
-            rate=_service.config.voice_rate,
-            volume=_service.config.voice_volume,
-            voice_id=_service.config.voice_id,
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-    except RuntimeError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
     return {"name": path.name}
 
 

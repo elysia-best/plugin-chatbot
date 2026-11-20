@@ -37,10 +37,6 @@
 | --- | --- | --- | --- |
 | `BRIDGE_VOICE_DIR` | `<状态目录>/voices` | 路径 | 受限的本地音频库目录。 |
 | `BRIDGE_VOICE_MAX_BYTES` | `20971520`（20 MiB） | ≥ 1 KiB | 单个音频文件大小上限。 |
-| `BRIDGE_VOICE_MAX_TEXT_CHARS` | `500` | 1–2000 | 单次合成允许的文本长度。 |
-| `BRIDGE_VOICE_RATE` | `175` | 80–300 | 语速。 |
-| `BRIDGE_VOICE_VOLUME` | `1.0` | 0–1 | 音量。 |
-| `BRIDGE_VOICE_ID` | 空 | 引擎语音 ID | 指定的系统语音；留空用引擎默认。 |
 | `BRIDGE_VOICE_SENDS_PER_HOUR` | `20` | 1–500 | 每小时语音发送上限。 |
 
 ## 搜索与黑话
@@ -70,10 +66,6 @@ BRIDGE_MAX_MEDIA_BYTES=8388608
 BRIDGE_CONSOLE_TOKEN=replace-with-a-long-random-token
 BRIDGE_VOICE_DIR=D:/path/to/voice-library
 BRIDGE_VOICE_MAX_BYTES=20971520
-BRIDGE_VOICE_MAX_TEXT_CHARS=500
-BRIDGE_VOICE_RATE=175
-BRIDGE_VOICE_VOLUME=1.0
-BRIDGE_VOICE_ID=
 BRIDGE_VOICE_SENDS_PER_HOUR=20
 BRIDGE_SLANG_ENABLED=true
 BRIDGE_SLANG_MIN_MESSAGES=10

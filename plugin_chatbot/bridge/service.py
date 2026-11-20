@@ -227,10 +227,6 @@ class BridgeConfig:
     role_dir: Path | None = None
     voice_dir: Path | None = None
     voice_max_bytes: int = 20 * 1024 * 1024
-    voice_max_text_chars: int = 500
-    voice_rate: int = 175
-    voice_volume: float = 1.0
-    voice_id: str = ""
     voice_sends_per_hour: int = 20
     slang_enabled: bool = True
     slang_min_messages: int = 10
@@ -725,7 +721,6 @@ class BridgeService:
         self.voice = VoiceLibrary(
             config.voice_dir or config.state_dir / "voices",
             max_bytes=config.voice_max_bytes,
-            max_text_chars=config.voice_max_text_chars,
         )
         self.memes = MemeLibrary(config.state_dir / "memes", config.max_media_bytes)
         self._init_custom_tools()
@@ -2225,15 +2220,6 @@ class BridgeService:
             self.state.save()
             return "Voice sent"
 
-        async def synthesize_voice(args: dict[str, Any], _ctx: ToolContext) -> str:
-            path = await self.voice.synthesize(
-                str(args.get("text", "")),
-                rate=self.config.voice_rate,
-                volume=self.config.voice_volume,
-                voice_id=self.config.voice_id,
-            )
-            return f"语音已生成并保存到语音库：{path.name}。发送前需由管理员明确要求。"
-
         async def list_memes(args: dict[str, Any], _ctx: ToolContext) -> str:
             keywords = args.get("keywords")
             rows = (
@@ -2406,18 +2392,6 @@ class BridgeService:
                     "additionalProperties": False,
                 },
                 send_voice,
-                "write",
-            ),
-            Tool(
-                "chat_synthesize_voice",
-                "Generate a local voice file; sending requires explicit instruction",
-                {
-                    "type": "object",
-                    "properties": {"text": {"type": "string"}},
-                    "required": ["text"],
-                    "additionalProperties": False,
-                },
-                synthesize_voice,
                 "write",
             ),
             Tool(
