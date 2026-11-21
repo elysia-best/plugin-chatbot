@@ -99,7 +99,7 @@ npm run build
 
 ## 指令
 
-`/status`、`/reset`、`/role [name|off]`、`/reply [0..1]`、`/mode <mode>`、`/approve <yes|no>` 对所有被允许的聊天用户开放，其中会改变状态的指令需要 Bot 管理员身份。群聊的回复概率也可在后台 **群聊策略** 页面设置。
+`/status` 只读，对所有被允许的聊天用户开放；`/reset`、`/role [name|off]`、`/reply [0..1]`、`/mode <mode>`、`/approve <yes|no>` 会改变会话上下文或 Bot 状态，**仅 Bot 管理员可执行**（其他用户会收到「无权执行管理命令。」）。群聊的回复概率也可在后台 **群聊策略** 页面设置。
 
 ## 文档
 

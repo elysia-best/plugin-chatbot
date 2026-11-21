@@ -33,7 +33,7 @@
 
 ## 指令
 
-`/status`、`/reset`、`/role [name|off]`、`/reply [0..1]`、`/mode <mode>`、`/approve <yes|no>` 对所有被允许的聊天用户开放；其中会改变状态的指令需要 Bot 管理员身份。`/silent` 与 `/active` 已移除，改用按群的回复概率。
+`/status` 只读，对所有被允许的聊天用户开放；`/reset`、`/role [name|off]`、`/reply [0..1]`、`/mode <mode>`、`/approve <yes|no>` 会改变会话上下文或 Bot 状态，**仅 Bot 管理员可执行**。`/silent` 与 `/active` 已移除，改用按群的回复概率。
 
 ## 会话与工具
 

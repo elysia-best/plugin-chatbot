@@ -1247,6 +1247,10 @@ class BridgeServiceTests(unittest.TestCase):
             self.service.command("member", "/reply 0.5", key, chat_id),
         )
         self.assertEqual(
+            "无权执行管理命令。",
+            self.service.command("member", "/mode agent", key, chat_id),
+        )
+        self.assertEqual(
             "回复概率只对群聊生效。",
             self.service.command("owner", "/reply 0.5", key, chat_id),
         )
@@ -1254,13 +1258,42 @@ class BridgeServiceTests(unittest.TestCase):
             "test", "bot", "group", "room-1"
         )
         self.assertEqual(
+            "无权执行管理命令。",
+            self.service.command("member", "/reply 0.5", group_key, group_chat),
+        )
+        self.assertEqual(
             "回复概率已设为 0.5。",
             self.service.command("owner", "/reply 0.5", group_key, group_chat),
         )
         self.assertEqual(0.5, self.service.reply_probability_for_key(group_key))
-        result = self.service.command("member", "/reset", key, chat_id)
-        self.assertIsNotNone(result)
-        self.assertIn("当前会话上下文已重置", result or "")
+        self.assertIn(
+            "模式：",
+            self.service.command("member", "/status", group_key, group_chat) or "",
+        )
+
+    def test_reset_is_admin_only_and_clears_transcript_and_cache(self) -> None:
+        key, chat_id = self.service.resolve_chat("test", "bot", "group", "room-1")
+        self.service.store.append(chat_id, Message(role="user", content="keep me"))
+        self.service.store.save(chat_id)
+        self.service.state.data["pending_messages"][key] = [
+            {"at": 0.0, "text": "buffered line"}
+        ]
+        self.service.state.save()
+
+        self.assertEqual(
+            "无权执行管理命令。",
+            self.service.command("member", "/reset", key, chat_id),
+        )
+        self.assertEqual(1, len(self.service.store.load_messages(chat_id)))
+        self.assertEqual(1, len(self.service.state.data["pending_messages"][key]))
+
+        self.assertEqual(
+            "当前会话上下文已重置。",
+            self.service.command("owner", "/reset", key, chat_id),
+        )
+        self.assertEqual([], self.service.store.load_messages(chat_id))
+        self.assertNotIn(key, self.service.state.data["pending_messages"])
+        self.assertNotIn(key, self.service.agents)
 
 
 class ReplyCleaningTests(unittest.TestCase):

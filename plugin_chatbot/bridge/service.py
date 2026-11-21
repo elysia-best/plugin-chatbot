@@ -82,6 +82,9 @@ MEMORY_WRAPPER_KEYS = ("memory", "memories", "result", "data", "items")
 # 审批是管理员决定：只有管理员私聊里的这些回复能放行/拒绝工具调用。
 APPROVAL_REPLIES = frozenset({"通过", "同意", "yes", "approve"})
 DENIAL_REPLIES = frozenset({"拒绝", "不同意", "no", "deny"})
+# 会改变状态（会话上下文、角色、回复概率、运行模式、工具审批）的指令，
+# 只允许 Bot 管理员执行；`/status` 只读，对所有被允许的聊天用户开放。
+ADMIN_COMMANDS = frozenset({"/reset", "/role", "/reply", "/mode", "/approve"})
 MODEL_CONTEXT_KEYS = (
     "context_length",
     "context_window",
@@ -3125,12 +3128,14 @@ class BridgeService:
                 f"模式：{self.state.data['mode']}；"
                 f"回复概率：{probability:g}；会话：{chat_id}"
             )
+        if command in ADMIN_COMMANDS and not admin:
+            self.state.log(f"{key} 拒绝非管理员执行 {command}：{user_id}")
+            return "无权执行管理命令。"
         if command == "/reset":
             self.store.replace(chat_id, [])
             self.agents.pop(key, None)
+            self._clear_pending(key)
             return "当前会话上下文已重置。"
-        if command in {"/role", "/reply", "/mode", "/approve"} and not admin:
-            return "无权执行管理命令。"
         if command == "/role":
             if not argument:
                 current = self.state.data.get("active_role") or "默认"
