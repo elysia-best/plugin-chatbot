@@ -10,6 +10,7 @@ export default function GroupEditor({ value, accounts, providers, tools, onClose
   );
   const [form, setForm] = useState({
     enabled: true,
+    reply_mode: 'probability',
     reply_probability: 1,
     reasoning_effort: 'medium',
     enabled_tools: null,
@@ -31,6 +32,7 @@ export default function GroupEditor({ value, accounts, providers, tools, onClose
         platform: account?.platform || form.platform || '',
         bot_id: account?.bot_id || form.bot_id || '',
         enabled: form.enabled !== false,
+        reply_mode: form.reply_mode || 'probability',
         reply_probability: form.reply_probability ?? 1,
         cost_limit: form.cost_limit === '' ? null : Number(form.cost_limit) || null,
       });
@@ -103,14 +105,23 @@ export default function GroupEditor({ value, accounts, providers, tools, onClose
           ]}
           onChange={(next) => set('model', next)}
         />
+        <SelectField
+          label="回复模式"
+          value={form.reply_mode || 'probability'}
+          options={['probability', 'mention_only']}
+          labels={['概率回复', '仅 @ 时回复']}
+          onChange={(next) => set('reply_mode', next)}
+        />
         <Field
           label="回复概率（0 永不回复 · 1 一直回复）"
           type="number"
           min={0}
           max={1}
           step={0.05}
+          disabled={form.reply_mode === 'mention_only'}
           value={form.reply_probability ?? 1}
           onChange={(next) => set('reply_probability', next)}
+          hint={form.reply_mode === 'mention_only' ? '当前为仅 @ 模式，此项不生效。' : ''}
         />
         <Field
           label="成本上限（可选）"

@@ -25,6 +25,14 @@ from agent.memory import MEMORY_TYPES, ProjectMemoryStore, project_memory_tools
 from agent.messages import Message
 from agent.tools import builtin_tools
 
+from .concurrency import (
+    DEFAULT_QUEUE_WAIT_SECONDS,
+    GatedLLM,
+    ModelGate,
+    ModelQueueTimeoutError,
+    normalize_concurrency,
+    normalize_queue_wait,
+)
 from .custom_tools import (
     DEFAULT_SCOPE,
     DEFAULT_TIMEOUT,
@@ -69,6 +77,10 @@ MEMORY_RETRY_BASE_SECONDS = 60
 MEMORY_RETRY_MAX_SECONDS = 900
 MAX_MEMORY_OUTPUT_CHARS = 100_000
 DEFAULT_REPLY_PROBABILITY = 1.0
+# 群聊回复触发方式：probability 按回复概率随机触发；mention_only 仅在被 @ 时触发。
+# mention_only 下 reply_probability 完全不参与判定。
+REPLY_MODES = ("probability", "mention_only")
+DEFAULT_REPLY_MODE = "probability"
 PENDING_MAX_CHARS = 2000
 PENDING_MAX_ROWS = 100
 PENDING_RECENT_LIMIT = 3
@@ -123,6 +135,36 @@ def positive_context_length(value: Any) -> int | None:
     if MIN_CONTEXT_LENGTH <= number <= MAX_CONTEXT_LENGTH:
         return number
     return None
+
+
+def _find_model_record(
+    provider: dict[str, Any] | None, model: str
+) -> dict[str, Any] | None:
+    """Return the provider's record for one selected model, or ``None``."""
+    if not provider or not model:
+        return None
+    return next(
+        (
+            entry
+            for entry in provider.get("models", [])
+            if isinstance(entry, dict) and entry.get("id") == model
+        ),
+        None,
+    )
+
+
+def _select_provider(providers: Any, provider_id: str) -> dict[str, Any] | None:
+    """Return the first provider row matching ``provider_id``, or ``None``."""
+    if not provider_id or not isinstance(providers, list):
+        return None
+    return next(
+        (
+            row
+            for row in providers
+            if isinstance(row, dict) and str(row.get("id")) == provider_id
+        ),
+        None,
+    )
 
 
 def extract_context_length(value: Any, *, depth: int = 0) -> int | None:
@@ -197,11 +239,21 @@ def normalize_model_records(models: Any) -> list[dict[str, Any]]:
             continue
         seen.add(model_id)
         context_length = extract_context_length(raw)
+        max_concurrency = normalize_concurrency(
+            raw.get("max_concurrency") if isinstance(raw, dict) else None
+        )
+        queue_wait_seconds = (
+            normalize_queue_wait(raw.get("queue_wait_seconds"))
+            if isinstance(raw, dict)
+            else DEFAULT_QUEUE_WAIT_SECONDS
+        )
         records.append(
             {
                 "id": model_id,
                 "context_length": context_length,
                 "context_source": "remote" if context_length else "fallback",
+                "max_concurrency": max_concurrency,
+                "queue_wait_seconds": queue_wait_seconds,
             }
         )
     return records
@@ -384,6 +436,7 @@ class BridgeState:
             group["reply_probability"] = (
                 DEFAULT_REPLY_PROBABILITY if probability is None else probability
             )
+            group["reply_mode"] = normalize_reply_mode(group.get("reply_mode"))
             if not group.get("name_source"):
                 group["name_source"] = (
                     "fallback"
@@ -501,6 +554,12 @@ def normalize_probability(value: Any) -> float | None:
     if not math.isfinite(probability) or not 0.0 <= probability <= 1.0:
         return None
     return probability
+
+
+def normalize_reply_mode(value: Any) -> str:
+    """Return a valid reply mode, falling back to :data:`DEFAULT_REPLY_MODE`."""
+    mode = str(value or "").strip().casefold()
+    return mode if mode in REPLY_MODES else DEFAULT_REPLY_MODE
 
 
 def _clamp_setting(value: Any, default: int, low: int, high: int) -> int:
@@ -738,6 +797,53 @@ class BridgeService:
             str, list[tuple[IncomingMessage, asyncio.Future[str]]]
         ] = {}
         self.group_batch_tasks: dict[str, asyncio.Task[None]] = {}
+        self._model_gates: dict[tuple[str, str], ModelGate] = {}
+
+    def model_gate(
+        self,
+        base_url: str,
+        model: str,
+        *,
+        max_concurrency: Any = None,
+        queue_wait_seconds: Any = None,
+    ) -> ModelGate:
+        """Return (and cache) the FIFO concurrency gate for one ``(base_url, model)``.
+
+        闸门按键缓存，同一接口+模型的会话共享并发额度；没有并发上限时不建闸。
+        排队等待时长变化时就地更新，不用重建队列（保留已有令牌）。
+        """
+        limit = normalize_concurrency(max_concurrency)
+        wait = normalize_queue_wait(queue_wait_seconds)
+        key = (str(base_url or ""), str(model or ""))
+        gate = self._model_gates.get(key)
+        if gate is None:
+            if limit is None:
+                return ModelGate(None, queue_wait_seconds=wait)
+            gate = ModelGate(limit, queue_wait_seconds=wait)
+            self._model_gates[key] = gate
+            return gate
+        if gate.limit == limit:
+            gate.queue_wait_seconds = wait
+            return gate
+        if limit is None:
+            self._model_gates.pop(key, None)
+            return ModelGate(None, queue_wait_seconds=wait)
+        gate = ModelGate(limit, queue_wait_seconds=wait)
+        self._model_gates[key] = gate
+        return gate
+
+    def resolve_model_gate(
+        self, platform: str, bot_id: str, kind: str, peer_id: str
+    ) -> ModelGate:
+        """Resolve the gate for the model a conversation currently uses."""
+        runtime = self.effective_chat_config(platform, bot_id, kind, peer_id)
+        return self.model_gate(
+            str(runtime.get("base_url") or ""),
+            str(runtime.get("model") or ""),
+            max_concurrency=runtime.get("max_concurrency"),
+            queue_wait_seconds=runtime.get("queue_wait_seconds"),
+        )
+
 
     def _init_custom_tools(self) -> None:
         self.custom_tools = CustomToolStore(self.config.state_dir / "custom_tools")
@@ -981,6 +1087,33 @@ class BridgeService:
         value = normalize_probability(group.get("reply_probability")) if group else None
         return DEFAULT_REPLY_PROBABILITY if value is None else value
 
+    def reply_mode(self, incoming: IncomingMessage) -> str:
+        """Return the group's configured reply mode (``probability`` by default)."""
+        if incoming.kind != "group":
+            return DEFAULT_REPLY_MODE
+        group = self.group_config(incoming.platform, incoming.bot_id, incoming.peer_id)
+        return (
+            normalize_reply_mode(group.get("reply_mode"))
+            if group
+            else DEFAULT_REPLY_MODE
+        )
+
+    def reply_mode_for_key(self, key: str) -> str:
+        """Return the reply mode for a persisted conversation key."""
+        record = self.state.data["conversations"].get(key, {})
+        if str(record.get("kind") or "") != "group":
+            return DEFAULT_REPLY_MODE
+        group = self.group_config(
+            str(record.get("platform") or ""),
+            str(record.get("bot_id") or ""),
+            str(record.get("peer_id") or ""),
+        )
+        return (
+            normalize_reply_mode(group.get("reply_mode"))
+            if group
+            else DEFAULT_REPLY_MODE
+        )
+
     def _pending_rows(self, key: str) -> list[dict[str, Any]]:
         """Return the live pending-message list for one conversation."""
         rows = self.state.data["pending_messages"].get(key)
@@ -1013,12 +1146,36 @@ class BridgeService:
                 "name_source": "fallback",
                 "enabled": True,
                 "reply_probability": DEFAULT_REPLY_PROBABILITY,
+                "reply_mode": DEFAULT_REPLY_MODE,
                 "enabled_tools": None,
             }
             self.state.data["groups"].append(group)
         return group
 
-    def effective_chat_config(  # noqa: C901
+    def _apply_model_record(
+        self, merged: dict[str, Any], provider: dict[str, Any] | None
+    ) -> None:
+        """Apply one selected model's context / concurrency overrides.
+
+        只有模型记录里显式出现的字段才覆盖接口级默认；缺失的字段保持原值。
+        """
+        selected_model = str(merged.get("model") or "")
+        model_record = _find_model_record(provider, selected_model)
+        if model_record is None:
+            return
+        context = positive_context_length(model_record.get("context_length"))
+        if context is not None:
+            merged["max_context"] = context
+        if "max_concurrency" in model_record:
+            concurrency = normalize_concurrency(model_record.get("max_concurrency"))
+            if concurrency is not None:
+                merged["max_concurrency"] = concurrency
+        if "queue_wait_seconds" in model_record:
+            merged["queue_wait_seconds"] = normalize_queue_wait(
+                model_record.get("queue_wait_seconds")
+            )
+
+    def effective_chat_config(
         self, platform: str, bot_id: str, kind: str, peer_id: str
     ) -> dict[str, Any]:
         """Merge account defaults and group overrides for one conversation."""
@@ -1027,18 +1184,9 @@ class BridgeService:
             self.group_config(platform, bot_id, peer_id) if kind == "group" else None
         )
         providers = self.state.data.get("interfaces", {}).get("providers", [])
-        provider: dict[str, Any] | None = None
-        account_provider_id = str(account.get("provider_id") or "")
-        if account_provider_id:
-            provider = next(
-                (
-                    row
-                    for row in providers
-                    if isinstance(row, dict)
-                    and str(row.get("id")) == account_provider_id
-                ),
-                None,
-            )
+        provider = _select_provider(
+            providers, str(account.get("provider_id") or "")
+        )
         account_model = model_id(account.get("model"))
         provider_model = model_id(provider.get("model")) if provider else ""
         merged: dict[str, Any] = {
@@ -1055,66 +1203,45 @@ class BridgeService:
             )
             or positive_context_length(account.get("context_length"))
             or self.config.max_context,
+            # 接口级默认并发：None 表示不限制；模型记录可覆盖。
+            "max_concurrency": normalize_concurrency(
+                (provider or {}).get("max_concurrency")
+            ),
+            "queue_wait_seconds": normalize_queue_wait(
+                (provider or {}).get("queue_wait_seconds")
+            ),
         }
-        if provider:
-            selected_model = str(merged.get("model") or "")
-            model_record = next(
-                (
-                    model
-                    for model in provider.get("models", [])
-                    if isinstance(model, dict) and model.get("id") == selected_model
-                ),
-                None,
-            )
-            if model_record:
-                merged["max_context"] = (
-                    positive_context_length(model_record.get("context_length"))
-                    or merged["max_context"]
-                )
+        self._apply_model_record(merged, provider)
         if group:
-            provider_id = group.get("provider_id")
-            if provider_id:
-                provider = next(
-                    (
-                        row
-                        for row in providers
-                        if isinstance(row, dict) and row.get("id") == provider_id
-                    ),
-                    None,
+            override = _select_provider(
+                providers, str(group.get("provider_id") or "")
+            )
+            if override is not None:
+                provider = override
+                merged.update(
+                    {
+                        "model": model_id(override.get("model")) or merged["model"],
+                        "base_url": override.get("base_url") or merged["base_url"],
+                        "api_key": override.get("api_key") or merged["api_key"],
+                        "max_context": positive_context_length(
+                            override.get("context_length")
+                        )
+                        or merged["max_context"],
+                        "max_concurrency": normalize_concurrency(
+                            override.get("max_concurrency")
+                        ),
+                        "queue_wait_seconds": normalize_queue_wait(
+                            override.get("queue_wait_seconds")
+                        ),
+                    }
                 )
-                if provider:
-                    merged.update(
-                        {
-                            "model": model_id(provider.get("model")) or merged["model"],
-                            "base_url": provider.get("base_url") or merged["base_url"],
-                            "api_key": provider.get("api_key") or merged["api_key"],
-                            "max_context": positive_context_length(
-                                provider.get("context_length")
-                            )
-                            or merged["max_context"],
-                        }
-                    )
             for key in ("model", "reasoning_effort", "cost_limit"):
                 value = group.get(key)
                 if value not in (None, ""):
                     merged[key] = value
             if group.get("system_prompt") not in (None, ""):
                 merged["system_prompt"] = str(group["system_prompt"])
-            selected_model = str(merged.get("model") or "")
-            if provider and selected_model:
-                model_record = next(
-                    (
-                        model
-                        for model in provider.get("models", [])
-                        if isinstance(model, dict) and model.get("id") == selected_model
-                    ),
-                    None,
-                )
-                if model_record:
-                    merged["max_context"] = (
-                        positive_context_length(model_record.get("context_length"))
-                        or merged["max_context"]
-                    )
+            self._apply_model_record(merged, provider)
         return merged
 
     def _account_persona(self, account: dict[str, Any]) -> str:
@@ -2109,10 +2236,35 @@ class BridgeService:
             reasoning_effort=str(runtime_config.get("reasoning_effort") or "") or None,
             project_memory_tools_enabled=False,
             allow_environment_fallback=False,
+            llm_client=self._chat_llm(runtime_config),
         )
         agent.load_chat(chat_id)
         self.agents[key] = agent
         return agent
+
+    def _chat_llm(self, runtime_config: dict[str, Any]) -> LLMClient | GatedLLM:
+        """Build the chat LLM backend, wrapping with the model gate when set."""
+        client = LLMClient(
+            model=str(runtime_config.get("model") or "") or None,
+            base_url=str(runtime_config.get("base_url") or "") or None,
+            api_key=str(runtime_config.get("api_key") or "") or None,
+            temperature=(
+                float(runtime_config.get("temperature", 0.7))
+                if runtime_config.get("temperature_enabled", True)
+                else None
+            ),
+            reasoning_effort=str(runtime_config.get("reasoning_effort") or "") or None,
+            allow_environment_fallback=False,
+        )
+        gate = self.model_gate(
+            str(runtime_config.get("base_url") or ""),
+            str(runtime_config.get("model") or ""),
+            max_concurrency=runtime_config.get("max_concurrency"),
+            queue_wait_seconds=runtime_config.get("queue_wait_seconds"),
+        )
+        if gate.unlimited:
+            return client
+        return GatedLLM(client, gate)
 
     async def _request_approval(
         self, key: str, question: str, timeout: float = 120.0
@@ -2147,6 +2299,7 @@ class BridgeService:
             return json.dumps(
                 {
                     "mode": self.state.data["mode"],
+                    "reply_mode": self.reply_mode_for_key(key),
                     "reply_probability": self.reply_probability_for_key(key),
                 },
                 ensure_ascii=False,
@@ -2516,7 +2669,7 @@ class BridgeService:
             raise RuntimeError("当前适配器无法发送语音/音频") from exc
         return True
 
-    def _slang_review_config(self) -> dict[str, str] | None:
+    def _slang_review_config(self) -> dict[str, Any] | None:
         """Resolve the configured review provider without any fallback."""
         settings = self.state.data.get("slang_settings", {})
         if not isinstance(settings, dict):
@@ -2544,14 +2697,16 @@ class BridgeService:
             "model": model,
             "base_url": base_url,
             "api_key": str(provider.get("api_key") or ""),
+            "max_concurrency": provider.get("max_concurrency"),
+            "queue_wait_seconds": provider.get("queue_wait_seconds"),
         }
 
-    def _slang_review_client(self) -> LLMClient | None:
+    def _slang_review_client(self) -> LLMClient | GatedLLM | None:
         """Build a one-shot LLM client for slang review, or None if unconfigured."""
         config = self._slang_review_config()
         if config is None:
             return None
-        return LLMClient(
+        client = LLMClient(
             model=config["model"],
             base_url=config["base_url"],
             api_key=config["api_key"],
@@ -2560,6 +2715,15 @@ class BridgeService:
             timeout=SLANG_REVIEW_TIMEOUT_SECONDS,
             allow_environment_fallback=False,
         )
+        gate = self.model_gate(
+            config["base_url"],
+            config["model"],
+            max_concurrency=config.get("max_concurrency"),
+            queue_wait_seconds=config.get("queue_wait_seconds"),
+        )
+        if gate.unlimited:
+            return client
+        return GatedLLM(client, gate)
 
     async def _review_slang_batch(
         self, key: str, rows: list[dict[str, Any]]
@@ -2673,6 +2837,7 @@ class BridgeService:
             reasoning_effort=str(runtime_config.get("reasoning_effort") or "") or None,
             project_memory_enabled=False,
             allow_environment_fallback=False,
+            llm_client=self._chat_llm(runtime_config),
         )
         try:
             result = await agent.run(prompt)
@@ -2763,10 +2928,10 @@ class BridgeService:
             except Exception as exc:  # noqa: BLE001
                 self.state.log(f"黑话提取失败：{type(exc).__name__}")
 
-    async def _handle_probabilistic_group(
-        self, incoming: IncomingMessage, probability: float
+    async def _handle_group_message(
+        self, incoming: IncomingMessage, *, should_reply: bool
     ) -> str:
-        """Buffer skipped messages and deliver them together on the next reply.
+        """Buffer skipped group messages and deliver them together on the next reply.
 
         Delivery consumes the buffer: queued rows are removed from persistence
         before the model runs, so a failed, rejected, or short-circuited turn
@@ -2774,7 +2939,8 @@ class BridgeService:
 
         Args:
             incoming: One raw group message.
-            probability: Configured reply probability in [0, 1).
+            should_reply: Whether this message should trigger a model turn.
+                ``False`` buffers the message for the next trigger.
 
         Returns:
             The bridge reply, or an empty string when this message is buffered.
@@ -2805,7 +2971,7 @@ class BridgeService:
         ):
             del pending[:-PENDING_RECENT_LIMIT]
         self.state.save()
-        if not (probability > 0.0 and random.random() < probability):
+        if not should_reply:
             return ""
         rows = list(pending)
         self._clear_pending(key)
@@ -2850,8 +3016,17 @@ class BridgeService:
             self.seen_events[incoming.event_id] = now
         if incoming.kind == "group" and not incoming.text.startswith("/"):
             probability = self.reply_probability(incoming)
+            reply_mode = self.reply_mode(incoming)
+            if reply_mode == "mention_only":
+                # 仅 @ 模式：只有被 @ 才触发模型；回复概率完全不参与判定。
+                return await self._handle_group_message(
+                    incoming, should_reply=bool(incoming.mentions_bot)
+                )
             if probability < DEFAULT_REPLY_PROBABILITY:
-                return await self._handle_probabilistic_group(incoming, probability)
+                should_reply = probability > 0.0 and random.random() < probability
+                return await self._handle_group_message(
+                    incoming, should_reply=should_reply
+                )
         if (
             incoming.kind != "group"
             or incoming.text.startswith("/")
@@ -3058,6 +3233,9 @@ class BridgeService:
             ]
             try:
                 result = await agent.run(prompt, chat_id=chat_id)
+            except ModelQueueTimeoutError as exc:
+                self.state.log(f"{key} 并发排队超时，放弃回复：{exc}")
+                return ""
             finally:
                 self.current_images.pop(key, None)
             self._record_usage(key, result.usage)
@@ -3124,9 +3302,11 @@ class BridgeService:
         )
         if command == "/status":
             probability = self.reply_probability_for_key(key)
+            reply_mode = self.reply_mode_for_key(key)
+            mode_label = "仅 @" if reply_mode == "mention_only" else "概率"
             return (
                 f"模式：{self.state.data['mode']}；"
-                f"回复概率：{probability:g}；会话：{chat_id}"
+                f"回复模式：{mode_label}；回复概率：{probability:g}；会话：{chat_id}"
             )
         if command in ADMIN_COMMANDS and not admin:
             self.state.log(f"{key} 拒绝非管理员执行 {command}：{user_id}")
@@ -3155,6 +3335,8 @@ class BridgeService:
         if command == "/reply":
             if str(record.get("kind") or "") != "group":
                 return "回复概率只对群聊生效。"
+            if self.reply_mode_for_key(key) == "mention_only":
+                return "当前为仅 @ 模式，回复概率不生效。"
             if not argument:
                 return f"当前回复概率：{self.reply_probability_for_key(key):g}"
             value = normalize_probability(argument)

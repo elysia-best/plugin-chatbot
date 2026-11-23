@@ -120,6 +120,17 @@ class PermanentFailureLLM:
         raise RuntimeError("Error code: 401 - invalid api key")
 
 
+class _RateLimitError(RuntimeError):
+    """带 ``status_code`` / ``response`` 附件的 429，模仿 provider 异常。"""
+
+    def __init__(self, retry_after: str | None) -> None:
+        super().__init__("Error code: 429 - inference exceeds tpm/rpm limit")
+        self.status_code = 429
+        self.response = SimpleNamespace(
+            headers={"retry-after": retry_after} if retry_after else {}
+        )
+
+
 class RateLimitLLM:
     def __init__(self, succeed_after: int, retry_after: str | None = None) -> None:
         self.succeed_after = succeed_after
@@ -129,14 +140,7 @@ class RateLimitLLM:
     async def complete(self, messages, tools=None, system_prompt=None):
         self.calls += 1
         if self.calls < self.succeed_after:
-            exc = RuntimeError(
-                "Error code: 429 - inference exceeds tpm/rpm limit"
-            )
-            exc.status_code = 429
-            exc.response = SimpleNamespace(
-                headers={"retry-after": self.retry_after} if self.retry_after else {}
-            )
-            raise exc
+            raise _RateLimitError(self.retry_after)
         return LLMResponse(content="rate limit recovered")
 
 

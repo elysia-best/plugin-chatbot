@@ -18,6 +18,7 @@ from nonebot_plugin_alconna import Target
 from agent.llm import LLMClient
 from agent.messages import Message
 from agent.tool import ToolContext
+from plugin_chatbot.bridge.concurrency import DEFAULT_QUEUE_WAIT_SECONDS
 from plugin_chatbot.bridge.service import (
     BridgeConfig,
     BridgeService,
@@ -623,9 +624,21 @@ class BridgeServiceTests(unittest.TestCase):
 
     def test_context_metadata_parser_supports_nested_provider_fields(self) -> None:
         self.assertEqual(128_000, extract_context_length({"metadata": {"max_model_len": "128000"}}))
+        records = normalize_model_records([{"id": "alpha", "context_window": 32_000}])
         self.assertEqual(
             [{"id": "alpha", "context_length": 32_000, "context_source": "remote"}],
-            normalize_model_records([{"id": "alpha", "context_window": 32_000}]),
+            [
+                {
+                    key: record[key]
+                    for key in ("id", "context_length", "context_source")
+                }
+                for record in records
+            ],
+        )
+        # 并发字段默认未配置：不设闸，排队超时用默认值。
+        self.assertIsNone(records[0]["max_concurrency"])
+        self.assertEqual(
+            DEFAULT_QUEUE_WAIT_SECONDS, records[0]["queue_wait_seconds"]
         )
 
     def test_slang_settings_survive_restart_and_are_bounded(self) -> None:

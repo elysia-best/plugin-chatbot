@@ -5,6 +5,7 @@ import { Field, SelectField } from '../../components/ui/Field.jsx';
 import Button from '../../components/ui/Button.jsx';
 import { api } from '../../lib/api.js';
 import { modelId } from '../../lib/format.js';
+import './ModelConcurrencyTable.css';
 
 const FIELD_LABELS = {
   skills: ['Skill 名称', '描述'],
@@ -51,6 +52,12 @@ export default function CapabilityEditor({ token, kind, value, onClose, onSave }
           ? {
               ...form,
               context_length: Number(form.context_length) || null,
+              max_concurrency: form.max_concurrency === '' || form.max_concurrency == null
+                ? null
+                : Number(form.max_concurrency),
+              queue_wait_seconds: form.queue_wait_seconds === '' || form.queue_wait_seconds == null
+                ? null
+                : Number(form.queue_wait_seconds),
               clear_api_key: clearKey,
             }
           : form;
@@ -114,6 +121,26 @@ export default function CapabilityEditor({ token, kind, value, onClose, onSave }
             onChange={(next) => set('context_length', next)}
             placeholder="远端未提供时使用"
           />
+          <Field
+            label="接口默认并发数"
+            type="number"
+            min={1}
+            max={64}
+            value={form.max_concurrency ?? ''}
+            onChange={(next) => set('max_concurrency', next)}
+            placeholder="留空表示不限制"
+            hint="同一接口同时只允许 N 个模型请求，其余按先来后到排队。"
+          />
+          <Field
+            label="排队等待秒数"
+            type="number"
+            min={1}
+            max={600}
+            value={form.queue_wait_seconds ?? ''}
+            onChange={(next) => set('queue_wait_seconds', next)}
+            placeholder="留空则使用默认 120 秒"
+            hint="等待超过该时长则放弃本次回复，不会向群里发任何内容。"
+          />
 
           <div className="ui-field ui-field--wide">
             <span className="ui-field__label">远端模型</span>
@@ -147,6 +174,62 @@ export default function CapabilityEditor({ token, kind, value, onClose, onSave }
                 : '当前模型未返回上下文，将使用备用设置或全局设置。'}
             </span>
           </div>
+
+          {models.length ? (
+            <div className="ui-field ui-field--wide">
+              <span className="ui-field__label">模型并发覆盖（留空则使用接口默认）</span>
+              <div className="model-concurrency-table">
+                <div className="model-concurrency-table__row model-concurrency-table__row--head">
+                  <span>模型 ID</span>
+                  <span>并发数</span>
+                  <span>排队等待秒数</span>
+                </div>
+                {models.map((model, index) => (
+                  <div key={model.id} className="model-concurrency-table__row">
+                    <span title={model.id} className="model-concurrency-table__id">
+                      {model.id}
+                    </span>
+                    <input
+                      className="ui-input"
+                      type="number"
+                      min={1}
+                      max={64}
+                      placeholder="接口默认"
+                      value={model.max_concurrency ?? ''}
+                      onChange={(event) =>
+                        set('models', models.map((item, itemIndex) =>
+                          itemIndex === index
+                            ? {
+                                ...item,
+                                max_concurrency: event.target.value === '' ? null : Number(event.target.value),
+                              }
+                            : item,
+                        ))
+                      }
+                    />
+                    <input
+                      className="ui-input"
+                      type="number"
+                      min={1}
+                      max={600}
+                      placeholder="接口默认"
+                      value={model.queue_wait_seconds ?? ''}
+                      onChange={(event) =>
+                        set('models', models.map((item, itemIndex) =>
+                          itemIndex === index
+                            ? {
+                                ...item,
+                                queue_wait_seconds: event.target.value === '' ? null : Number(event.target.value),
+                              }
+                            : item,
+                        ))
+                      }
+                    />
+                  </div>
+                ))}
+              </div>
+            </div>
+          ) : null}
         </div>
 
         {error ? (

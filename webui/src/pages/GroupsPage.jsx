@@ -53,7 +53,7 @@ export default function GroupsPage({ token, snapshot, tools, onRefresh }) {
       <PageHeader
         kicker="GROUP POLICIES"
         title="群聊策略"
-        description="群聊提示词会完整覆盖账号人格；回复概率 0~1，未命中的消息会暂存并在下次回复时带上时间戳交给模型。"
+        description="群聊提示词会完整覆盖账号人格；可切换概率回复或仅 @ 时回复。仅 @ 模式下回复概率不参与判定，未 @ 的消息会暂存并在下次 @ 时带上时间戳交给模型。"
         action="添加策略"
         actionIcon={Plus}
         onAction={() => setEditor({})}
@@ -70,20 +70,22 @@ export default function GroupsPage({ token, snapshot, tools, onRefresh }) {
 
         {groups.length ? (
           <DataTable
-            layout="minmax(230px, 1.4fr) minmax(120px, .8fr) minmax(120px, .8fr) 78px 88px 112px 96px"
-            minWidth={1040}
+            layout="minmax(230px, 1.4fr) minmax(120px, .8fr) minmax(120px, .8fr) 78px 88px 112px 96px 112px"
+            minWidth={1140}
           >
             <div className="ui-table__head">
               <span>群聊</span>
               <span>供应商</span>
               <span>模型</span>
               <span>工具</span>
+              <span>回复模式</span>
               <span>回复概率</span>
               <span>状态</span>
               <span className="ui-table__head-end">操作</span>
             </div>
             {groups.map((group, index) => {
               const provider = providers.find((item) => item.id === group.provider_id);
+              const replyModeLabel = group.reply_mode === 'mention_only' ? '仅 @' : '概率';
               return (
                 <DataRow key={group.id} index={index}>
                   <IdentityCell
@@ -95,7 +97,8 @@ export default function GroupsPage({ token, snapshot, tools, onRefresh }) {
                   <Cell>{providerLabel(provider) || '跟随账号'}</Cell>
                   <Cell>{modelId(group.model) || modelId(provider?.model) || '账号默认'}</Cell>
                   <Cell>{group.enabled_tools?.length || '继承默认'}</Cell>
-                  <Cell>{group.reply_probability ?? 1}</Cell>
+                  <Cell>{replyModeLabel}</Cell>
+                  <Cell>{group.reply_mode === 'mention_only' ? '—' : (group.reply_probability ?? 1)}</Cell>
                   <Cell>
                     <StatusBadge enabled={group.enabled !== false} />
                   </Cell>

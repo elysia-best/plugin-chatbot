@@ -13,6 +13,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -27,6 +28,25 @@ from plugin_chatbot.bridge.custom_tools import (
     validate_definition,
 )
 from plugin_chatbot.bridge.service import BridgeConfig, BridgeService
+
+if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
+    _Handler = Callable[[dict[str, Any], ToolContext], Awaitable[str]]
+
+
+def _run_handler(
+    handler: _Handler,
+    args: dict[str, Any],
+    ctx: ToolContext,
+) -> Any:
+    """把 handler 包装成协程，使 :func:`asyncio.run` 的签名检查通过。"""
+
+    async def _main() -> Any:
+        return await handler(args, ctx)
+
+    return _main()
+
 
 RUNNER = (
     Path(__file__).resolve().parents[1]
@@ -585,9 +605,10 @@ class CustomToolServiceTests(unittest.TestCase):
             if item.name == "custom_probe"
         )
         ctx = ToolContext(workspace=self.temp.name)
-        self.assertEqual(
-            "hello agent", asyncio.run(tool.handler({"who": "agent"}, ctx))
+        result = asyncio.run(
+            _run_handler(tool.handler, {"who": "agent"}, ctx)
         )
+        self.assertEqual("hello agent", result)
 
     def test_tool_handler_reports_errors_with_prefix(self) -> None:
         admin_key, _, _ = self._keys()
@@ -598,7 +619,9 @@ class CustomToolServiceTests(unittest.TestCase):
             for item in self.service.available_session_tools(admin_key)
             if item.name == "custom_probe"
         )
-        output = asyncio.run(tool.handler({}, ToolContext(workspace=self.temp.name)))
+        output = asyncio.run(
+            _run_handler(tool.handler, {}, ToolContext(workspace=self.temp.name))
+        )
         self.assertTrue(output.startswith("Error:"))
         self.assertIn("ZeroDivisionError", output)
 

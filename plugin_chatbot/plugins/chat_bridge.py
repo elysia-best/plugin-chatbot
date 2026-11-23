@@ -21,6 +21,10 @@ from nonebot_plugin_alconna import Image, Target, UniMessage, get_target, image_
 from pydantic import BaseModel
 
 from plugin_chatbot.bridge import BridgeConfig, BridgeService
+from plugin_chatbot.bridge.concurrency import (
+    normalize_concurrency,
+    normalize_queue_wait,
+)
 from plugin_chatbot.bridge.custom_tools import (
     DEFAULT_TIMEOUT,
     MAX_SOURCE_CHARS,
@@ -41,7 +45,9 @@ from plugin_chatbot.bridge.mentions import (
     segment_text,
 )
 from plugin_chatbot.bridge.service import (
+    DEFAULT_REPLY_MODE,
     DEFAULT_REPLY_PROBABILITY,
+    REPLY_MODES,
     IncomingMessage,
     merge_slang_settings,
     normalize_model_records,
@@ -511,6 +517,7 @@ async def _handle_message(bot: Bot, event: Event) -> None:  # noqa: C901
                 "enabled": True,
                 "provider_id": "",
                 "system_prompt": "",
+                "reply_mode": DEFAULT_REPLY_MODE,
                 "reply_probability": DEFAULT_REPLY_PROBABILITY,
                 "reasoning_effort": "",
                 "model": "",
@@ -601,6 +608,18 @@ def _probability_value(value: Any) -> float:
             status_code=422, detail="Reply probability must be between 0 and 1"
         )
     return probability
+
+
+def _reply_mode_value(value: Any) -> str:
+    raw = str(value or "").strip().casefold()
+    if raw in REPLY_MODES:
+        return raw
+    if raw or value not in (None, ""):
+        raise HTTPException(
+            status_code=422,
+            detail="Reply mode must be one of " + ", ".join(REPLY_MODES),
+        )
+    return DEFAULT_REPLY_MODE
 
 
 @_api.get("/api/accounts", dependencies=[Depends(_authorize)])
@@ -738,6 +757,7 @@ async def _create_group(body: dict[str, Any]) -> dict[str, Any]:
         "enabled": bool(body.get("enabled", True)),
         "provider_id": str(body.get("provider_id") or ""),
         "system_prompt": str(body.get("system_prompt") or ""),
+        "reply_mode": _reply_mode_value(body.get("reply_mode")),
         "reply_probability": _probability_value(
             body.get("reply_probability", DEFAULT_REPLY_PROBABILITY)
         ),
@@ -780,6 +800,8 @@ async def _update_group(row_id: str, body: dict[str, Any]) -> dict[str, Any]:
             row[key] = body[key]
     if "reply_probability" in body:
         row["reply_probability"] = _probability_value(body["reply_probability"])
+    if "reply_mode" in body:
+        row["reply_mode"] = _reply_mode_value(body["reply_mode"])
     row.pop("reply_frequency", None)
     if "name" in body:
         row["name_source"] = "manual" if str(body["name"]).strip() else "fallback"
@@ -809,6 +831,18 @@ async def _interfaces(kind: str) -> list[dict[str, Any]]:
     ]
 
 
+def _normalize_provider_concurrency(payload: dict[str, Any]) -> None:
+    """归一化接口级并发字段；未填写时不写入，保留旧值。"""
+    if "max_concurrency" in payload:
+        payload["max_concurrency"] = normalize_concurrency(
+            payload.get("max_concurrency")
+        )
+    if "queue_wait_seconds" in payload:
+        payload["queue_wait_seconds"] = normalize_queue_wait(
+            payload.get("queue_wait_seconds")
+        )
+
+
 @_api.post("/api/interfaces/{kind}", dependencies=[Depends(_authorize)])
 async def _create_interface(kind: str, body: dict[str, Any]) -> dict[str, Any]:
     if kind not in {"providers", "skills", "mcps", "rules"}:
@@ -816,6 +850,7 @@ async def _create_interface(kind: str, body: dict[str, Any]) -> dict[str, Any]:
     payload = dict(body)
     if kind == "providers":
         payload["api_key"] = _stored_api_key(payload, "")
+        _normalize_provider_concurrency(payload)
     row = {"id": _new_id(), **payload}
     if kind == "providers":
         row["models"] = normalize_model_records(row.get("models", []))
@@ -837,7 +872,10 @@ async def _update_interface(
         raise HTTPException(status_code=404, detail="Interface not found")
     payload = dict(body)
     if kind == "providers":
-        payload["api_key"] = _stored_api_key(payload, str(row.get("api_key") or ""))
+        payload["api_key"] = _stored_api_key(
+            payload, str(row.get("api_key") or "")
+        )
+        _normalize_provider_concurrency(payload)
     row.update(payload)
     if kind == "providers":
         row["models"] = normalize_model_records(row.get("models", []))

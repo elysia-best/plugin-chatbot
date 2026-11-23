@@ -67,6 +67,11 @@ _TRANSIENT_RETRY_WINDOW_SECONDS = 30.0
 _TRANSIENT_RETRY_BASE_SECONDS = 0.5
 _RATE_LIMIT_RETRY_BASE_SECONDS = 2.0
 _MAX_RETRY_AFTER_SECONDS = 60.0
+# HTTP 状态码：429 Too Many Requests 与 5xx 服务端错误。用于从 provider 异常里
+# 判断是否值得重试。
+_HTTP_TOO_MANY_REQUESTS = 429
+_HTTP_SERVER_ERROR_MIN = 500
+_HTTP_SERVER_ERROR_MAX = 600
 _RATE_LIMIT_ERROR_MARKERS = (
     "inference exceeds tpm/rpm limit",
     "all available accounts are currently rate-limited",
@@ -94,9 +99,9 @@ _SUMMARY_SYSTEM_PROMPT = (
 
 
 def _provider_error_details(exc: Exception) -> tuple[int | None, str, Any]:
-    status_code = getattr(exc, "status_code", None)
+    raw_status: Any = getattr(exc, "status_code", None)
     try:
-        normalized_status = int(status_code)
+        normalized_status: int | None = int(raw_status)
     except (TypeError, ValueError, OverflowError):
         normalized_status = None
     parts = [str(exc)]
@@ -113,7 +118,10 @@ def _provider_error_details(exc: Exception) -> tuple[int | None, str, Any]:
 
 def _is_rate_limit_error(exc: Exception) -> bool:
     status_code, text, _response = _provider_error_details(exc)
-    explicit_429 = status_code == 429 or "error code: 429" in text
+    explicit_429 = (
+        status_code == _HTTP_TOO_MANY_REQUESTS
+        or "error code: 429" in text
+    )
     if not explicit_429:
         return False
     return not any(
@@ -140,7 +148,12 @@ def _persona_correction(pattern: str) -> str:
 
 def _is_transient_provider_error(exc: Exception) -> bool:
     status_code, text, _response = _provider_error_details(exc)
-    if status_code is not None and 500 <= status_code < 600:
+    if (
+        status_code is not None
+        and _HTTP_SERVER_ERROR_MIN
+        <= status_code
+        < _HTTP_SERVER_ERROR_MAX
+    ):
         return True
     if isinstance(exc, (TimeoutError, ConnectionError, OSError)):
         return True

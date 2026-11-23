@@ -148,5 +148,8 @@ dmypy.json
 .vscode/
 webui/node_modules/
 webui/dist/
+# 前端源码里的工具模块目录；上面的 Python lib/ 规则不能连它一起忽略。
+!webui/src/lib/
+!webui/src/lib/**
 
 .workbuddy/

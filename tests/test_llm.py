@@ -3,6 +3,7 @@
 import asyncio
 import json
 import sys
+from typing import Any
 
 sys.path.insert(0, ".")
 
@@ -73,7 +74,7 @@ async def test_text_stream():
 
 
 async def test_request_limits_images_without_mutating_history():
-    captured = {}
+    captured: dict[str, Any] = {}
 
     async def handler(request):
         captured.update(json.loads(request.content))
@@ -102,11 +103,21 @@ async def test_request_limits_images_without_mutating_history():
 
     await client.complete([message])
 
-    sent_content = captured["messages"][0]["content"]
+    sent_content: list[Any] = captured["messages"][0]["content"]
     sent_images = [block for block in sent_content if block.get("type") == "image_url"]
     check("request_image_limit", len(sent_images) == 50)
-    check("request_keeps_newest_images", sent_images[-1]["image_url"]["url"].endswith("50.png"))
-    check("history_images_unchanged", sum(block.get("type") == "image_url" for block in message.content) == 51)
+    newest = sent_images[-1]["image_url"]
+    assert isinstance(newest, dict)
+    check(
+        "request_keeps_newest_images",
+        str(newest.get("url", "")).endswith("50.png"),
+    )
+    history = message.content or []
+    assert isinstance(history, list)
+    check(
+        "history_images_unchanged",
+        sum(block.get("type") == "image_url" for block in history) == 51,
+    )
 
 
 async def test_tool_call_stream():
