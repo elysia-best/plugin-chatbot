@@ -24,6 +24,21 @@ export default function GroupEditor({ value, accounts, providers, tools, onClose
   const provider = providers.find((item) => item.id === form.provider_id);
   const models = provider?.models || [];
 
+  // 切换供应商时，当前模型若不属于新供应商则回落到该供应商默认；
+  // 选“跟随账号”则清空模型，由账号默认接管。
+  function selectProvider(providerId) {
+    const nextProvider = providers.find((item) => item.id === providerId);
+    const currentModel = modelId(form.model);
+    const stillAvailable = nextProvider?.models?.some(
+      (item) => item.id === currentModel,
+    );
+    setForm((previous) => ({
+      ...previous,
+      provider_id: providerId,
+      model: stillAvailable ? currentModel : modelId(nextProvider?.model),
+    }));
+  }
+
   async function submit() {
     setBusy(true);
     try {
@@ -91,7 +106,7 @@ export default function GroupEditor({ value, accounts, providers, tools, onClose
           value={form.provider_id || ''}
           options={['', ...providers.map((item) => item.id)]}
           labels={['跟随账号', ...providers.map(providerLabel)]}
-          onChange={(next) => set('provider_id', next)}
+          onChange={selectProvider}
         />
         <SelectField
           label="模型"
